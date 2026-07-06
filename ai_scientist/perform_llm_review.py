@@ -1,3 +1,17 @@
+"""LLM-based paper review utilities.
+
+这个文件把生成出的论文 PDF 转成文本，然后让一个或多个 LLM 扮演 ML 会议审稿人，
+输出结构化 review JSON。它不是训练或评估模型的代码，而是论文生成后的质量
+检查阶段：用固定审稿表单约束 LLM，从 Summary、Strengths、Weaknesses、
+Originality、Quality、Overall、Decision 等维度给出评审。
+
+关键耦合点：
+- `load_paper` 依赖 pymupdf4llm / pymupdf / pypdf 从 PDF 中抽取文本。
+- `perform_review` 依赖 ai_scientist.llm 中的单次/批量 LLM 调用与 JSON 提取。
+- `fewshot_examples/` 提供示例论文和示例 review，让模型模仿会议审稿格式。
+- `get_meta_review` 把多个 reviewer JSON 聚合成一个 Area Chair 风格的 meta-review。
+"""
+
 import os
 import json
 import numpy as np
@@ -14,6 +28,9 @@ reviewer_system_prompt_base = (
     "You are an AI researcher who is reviewing a paper that was submitted to a prestigious ML venue."
     "Be critical and cautious in your decision."
 )
+
+# 这里准备了偏负面和偏正面的系统提示。调用方可以通过 reviewer_system_prompt
+# 选择审稿倾向，从而模拟更严格或更宽松的 reviewer。
 reviewer_system_prompt_neg = (
     reviewer_system_prompt_base
     + "If a paper is bad or you are unsure, give it bad scores and reject it."
@@ -23,6 +40,8 @@ reviewer_system_prompt_pos = (
     + "If a paper is good or you are unsure, give it good scores and accept it."
 )
 
+# template_instructions 是输出协议：LLM 可以先写 THOUGHT，但最终必须给出可解析
+# 的 REVIEW JSON。后面的 extract_json_between_markers 就依赖这个格式。
 template_instructions = """
 Respond in the following format:
 
@@ -135,7 +154,18 @@ def perform_review(
     reviewer_system_prompt=reviewer_system_prompt_neg,
     review_instruction_form=neurips_form,
 ):
+    """对论文全文生成结构化 LLM review。
+
+    支持两种模式：
+    - 单 reviewer：直接让一个 LLM 输出 review JSON；
+    - ensemble：并行生成多个 review，解析后交给 `get_meta_review` 聚合，再把
+      各项数值评分用 ensemble 均值校准。
+
+    `num_reflections` 会让同一个 reviewer 在已有对话历史上反思并修订 review。
+    """
     if num_fs_examples > 0:
+        # few-shot 示例把真实论文文本和对应 review 拼到表单后面，帮助模型沿用
+        # “会议审稿”的结构和尺度，而不是写成普通读后感。
         fs_prompt = get_review_fewshot_examples(num_fs_examples)
         base_prompt = review_instruction_form + fs_prompt
     else:
@@ -148,6 +178,7 @@ Here is the paper you are asked to review:
 ```"""
 
     if num_reviews_ensemble > 1:
+        # 多 reviewer 模式先批量采样多个独立评审，再把有效 JSON 交给 meta reviewer。
         llm_reviews, msg_histories = get_batch_responses_from_llm(
             base_prompt,
             model=model,
@@ -165,6 +196,9 @@ Here is the paper you are asked to review:
             except Exception as e:
                 print(f"Ensemble review {idx} failed: {e}")
         parsed_reviews = [r for r in parsed_reviews if r is not None]
+
+        # meta-review 负责综合文字判断；下面的数值字段再用 ensemble 均值覆盖，
+        # 避免单个 meta reviewer 把分数漂得太远。
         review = get_meta_review(model, client, temperature, parsed_reviews)
         if review is None:
             review = parsed_reviews[0]
@@ -201,6 +235,7 @@ REVIEW JSON:
             }
         ]
     else:
+        # 单 reviewer 模式：一次 LLM 调用，直接从回复中抽取 REVIEW JSON。
         llm_review, msg_history = get_response_from_llm(
             base_prompt,
             model=model,
@@ -213,6 +248,7 @@ REVIEW JSON:
         review = extract_json_between_markers(llm_review)
 
     if num_reflections > 1:
+        # 反思轮沿用同一个 msg_history，让模型看到自己上一版 review 并修正。
         for j in range(num_reflections - 1):
             text, msg_history = get_response_from_llm(
                 reviewer_reflection_prompt,
@@ -255,6 +291,12 @@ ONLY INCLUDE "I am done" IF YOU ARE MAKING NO MORE CHANGES."""
 
 
 def load_paper(pdf_path, num_pages=None, min_size=100):
+    """从 PDF 中抽取论文文本，按从强到弱的三个后备方案尝试。
+
+    pymupdf4llm 通常能保留更好的 Markdown 结构；如果抽取失败或文本太短，就
+    回退到 pymupdf，再回退到 pypdf。这样审稿阶段不会因为单个 PDF 解析器失败
+    而直接中断。
+    """
     try:
         if num_pages is None:
             text = pymupdf4llm.to_markdown(pdf_path)
@@ -289,6 +331,7 @@ def load_paper(pdf_path, num_pages=None, min_size=100):
 
 
 def load_review(json_path):
+    """读取 few-shot 示例 review JSON 文件中的 `review` 字段。"""
     with open(json_path, "r") as json_file:
         loaded = json.load(json_file)
     return loaded["review"]
@@ -296,6 +339,8 @@ def load_review(json_path):
 
 dir_path = os.path.dirname(os.path.realpath(__file__))
 
+# few-shot 示例与本文件强耦合：`get_review_fewshot_examples` 会按相同下标把
+# paper PDF/TXT 与 review JSON 拼成示例。
 fewshot_papers = [
     os.path.join(dir_path, "fewshot_examples/132_automated_relational.pdf"),
     os.path.join(dir_path, "fewshot_examples/attention.pdf"),
@@ -310,6 +355,7 @@ fewshot_reviews = [
 
 
 def get_review_fewshot_examples(num_fs_examples=1):
+    """把示例论文和示例审稿拼成 prompt 片段。"""
     fewshot_prompt = """
 Below are some sample reviews, copied from previous machine learning conferences.
 Note that while each review is formatted differently according to each reviewer's style, the reviews are well-structured and therefore easy to navigate.
@@ -318,6 +364,7 @@ Note that while each review is formatted differently according to each reviewer'
         fewshot_papers[:num_fs_examples], fewshot_reviews[:num_fs_examples]
     ):
         txt_path = paper_path.replace(".pdf", ".txt")
+        # 优先读取缓存好的 txt，避免每次 few-shot 都重新解析 PDF。
         if os.path.exists(txt_path):
             with open(txt_path, "r") as f:
                 paper_text = f.read()
@@ -347,6 +394,7 @@ Be critical and cautious in your decision, find consensus, and respect the opini
 
 
 def get_meta_review(model, client, temperature, reviews):
+    """把多个 reviewer JSON 交给 LLM 聚合成一个 meta-review JSON。"""
     review_text = ""
     for i, r in enumerate(reviews):
         review_text += f"""

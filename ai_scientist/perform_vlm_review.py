@@ -1,3 +1,19 @@
+"""VLM-based figure review utilities.
+
+这个文件负责论文生成后的“看图审查”：从 PDF 中截出图像区域，收集 caption 和
+正文里对该图的引用，然后把图片交给视觉语言模型（VLM）检查图本身、caption、
+正文引用是否一致。它也提供重复图检测和“图是否值得放在正文”的选择性审查。
+
+这里没有真正理解 PDF 版式的完整排版引擎；主要靠 PyMuPDF 的文本块坐标、
+caption 正则和 VLM 的图像理解能力组成一个尽力而为的检查器。
+
+关键耦合点：
+- perform_llm_review.load_paper 负责把同一个 PDF 抽成文本，用于提取 abstract。
+- ai_scientist.vlm.get_response_from_vlm / get_batch_responses_from_vlm 负责 VLM 调用。
+- perform_icbinb_writeup.py 会在反思写作时调用这里的 caption/引用审查、
+  重复图检测和正文图选择审查。
+"""
+
 import os
 import hashlib
 import pymupdf
@@ -13,7 +29,7 @@ from ai_scientist.perform_llm_review import load_paper
 
 
 def encode_image_to_base64(image_data):
-    """Encode image data to base64 string."""
+    """把图片路径、bytes 或 PyMuPDF pixmap 数据转成 API 可用的 base64 字符串。"""
     if isinstance(image_data, str):
         with open(image_data, "rb") as image_file:
             return base64.b64encode(image_file.read()).decode("utf-8")
@@ -30,6 +46,10 @@ reviewer_system_prompt_base = (
     "Be critical and cautious in your decision."
 )
 
+# 下面三个 prompt 分别对应三种视觉审查粒度：
+# - 图 + caption + 正文引用是否互相支持；
+# - 在页数限制下，这张图是否值得留在正文；
+# - 单独描述/评价一张图，供 writeup 阶段理解 figures/*.png。
 img_cap_ref_review_prompt = """The abstract of the paper is:
 
 {abstract}
@@ -163,6 +183,9 @@ def extract_figure_screenshots(
     and also gather text blocks (anywhere in the PDF) mentioning that
     exact figure with "Figure", "Fig.", or "Fig-ure" (including line breaks).
     Avoid partial matches, e.g. "Figure 11" doesn't match "Figure 1".
+
+    重要：这里不是提取 PDF 内嵌图片对象，而是根据 caption 坐标截取其上方区域。
+    caption 若写成 "Fig. 1"、跨文本块、在图侧边，或图跨页，都可能无法识别。
     """
     os.makedirs(img_folder_path, exist_ok=True)
     doc = pymupdf.open(pdf_path)
@@ -171,6 +194,8 @@ def extract_figure_screenshots(
     )
 
     # ---------- (A) EXTRACT ALL TEXT BLOCKS FROM THE DOCUMENT ----------
+    # 先把整篇 PDF 的文本块和坐标读出来。后面既用坐标判断 caption 上方的图像
+    # 截图范围，也用文本内容查找正文里提到该 Figure 的句段。
     text_blocks = []  # will hold dicts: { 'page': int, 'bbox': Rect, 'text': str }
     for page_num in page_range:
         page = doc[page_num]
@@ -186,6 +211,8 @@ def extract_figure_screenshots(
             print(f"Error extracting text from page {page_num}: {e}")
 
     # ---------- (B) REGEX FOR FIGURE CAPTIONS  ----------
+    # 这里只识别以 “Figure <编号>.” 或 “Figure <编号>:” 开头的 caption。
+    # 如果模板使用 Fig.、图名跨块、或 caption 不在图下方，截图可能漏掉或截错。
     # Captures the figure label so we can reference it later (group name 'fig_label').
     # Example matches: "Figure 1:", "Figure (A).2.", "Figure A.1:"
     figure_caption_pattern = re.compile(
@@ -227,6 +254,8 @@ def extract_figure_screenshots(
             fig_x0, fig_y0, fig_x1, fig_y1 = blk["bbox"]
 
             # (a) Find a large text block above the caption (on the same page)
+            # 简化假设：图通常就在 caption 上方，且与 caption 横向有明显重叠。
+            # 这对常见论文有效，但对跨页图、caption 在侧边、复杂多栏排版并不稳。
             above_blocks = []
             for ab in page_blocks:
                 if ab["bbox"].y1 < fig_y0:
@@ -275,6 +304,8 @@ def extract_figure_screenshots(
                 pix.save(fig_filepath)
 
                 # (c) Now find references across the ENTIRE DOCUMENT
+                # 正文引用查找不理解语义，只按 Figure/Fig. + 同一编号做正则匹配；
+                # negative lookahead 用来避免 Figure 1 误匹配 Figure 11。
                 #     We'll build a pattern that matches:
                 #         Figure/Fig./Fig-ure + possible line break + fig_label
                 #     We also ensure we do NOT match if there's a digit/letter
@@ -309,6 +340,7 @@ def extract_figure_screenshots(
 
 
 def extract_abstract(text):
+    """从 Markdown-ish 论文文本里抽取 Abstract 小节。"""
     # Split text into lines
     lines = text.split("\n")
 
@@ -348,6 +380,7 @@ def extract_abstract(text):
 
 
 def generate_vlm_img_cap_ref_review(img, abstract, model, client):
+    """让 VLM 检查单张图、caption 和正文引用的一致性。"""
     prompt = img_cap_ref_review_prompt.format(
         abstract=abstract,
         caption=img["caption"],
@@ -361,6 +394,7 @@ def generate_vlm_img_cap_ref_review(img, abstract, model, client):
 
 
 def generate_vlm_img_review(img, model, client):
+    """只让 VLM 描述并评价一张图，不使用 caption 或正文引用。"""
     prompt = img_review_prompt
     content, _ = get_response_from_vlm(
         prompt, img["images"], client, model, reviewer_system_prompt_base
@@ -370,6 +404,7 @@ def generate_vlm_img_review(img, model, client):
 
 
 def perform_imgs_cap_ref_review(client, client_model, pdf_path):
+    """对 PDF 中所有可截取的 Figure 做图像/caption/正文引用审查。"""
     paper_txt = load_paper(pdf_path)
     img_folder_path = os.path.join(
         os.path.dirname(pdf_path),
@@ -380,6 +415,7 @@ def perform_imgs_cap_ref_review(client, client_model, pdf_path):
     img_pairs = extract_figure_screenshots(pdf_path, img_folder_path)
     img_reviews = {}
     abstract = extract_abstract(paper_txt)
+    # 每张图独立调用一次 VLM。返回值以 figure label 为 key，方便写作反思阶段定位。
     for img in img_pairs:
         review = generate_vlm_img_cap_ref_review(img, abstract, client_model, client)
         img_reviews[img["img_name"]] = review
@@ -387,6 +423,7 @@ def perform_imgs_cap_ref_review(client, client_model, pdf_path):
 
 
 def detect_duplicate_figures(client, client_model, pdf_path):
+    """把 PDF 中截出的所有图一次性发给 VLM，请它判断是否有重复或高度相似图。"""
     paper_txt = load_paper(pdf_path)
     img_folder_path = os.path.join(
         os.path.dirname(pdf_path),
@@ -418,7 +455,10 @@ def detect_duplicate_figures(client, client_model, pdf_path):
         },
     ]
 
-    # Add images in the correct format
+    # 这里直接走 OpenAI-compatible chat.completions 图片消息格式，而不是
+    # get_response_from_vlm 包装器，因为任务需要一次发送多张图做相互比较。
+    # 注意：prompt 没有逐张附上 img_name 到图片的显式映射，所以模型给出的
+    # “exact figure names” 是弱约束，适合提示人工/LLM 反思，不适合当硬判据。
     for img_info in img_pairs:
         messages[1]["content"].append(
             {
@@ -448,6 +488,7 @@ def detect_duplicate_figures(client, client_model, pdf_path):
 def generate_vlm_img_selection_review(
     img, abstract, model, client, reflection_page_info
 ):
+    """在已有页数压力信息下，让 VLM 评价某张图是否值得保留在正文。"""
     prompt = img_cap_selection_prompt.format(
         abstract=abstract,
         caption=img["caption"],
@@ -464,6 +505,7 @@ def generate_vlm_img_selection_review(
 def perform_imgs_cap_ref_review_selection(
     client, client_model, pdf_path, reflection_page_info
 ):
+    """对 PDF 中所有图做“正文/附录/删除/合并”倾向的视觉审查。"""
     paper_txt = load_paper(pdf_path)
     img_folder_path = os.path.join(
         os.path.dirname(pdf_path),

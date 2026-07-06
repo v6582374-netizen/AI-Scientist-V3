@@ -1,3 +1,23 @@
+"""ICBINB workshop LaTeX writeup stage.
+
+这个文件是 `perform_writeup.py` 的 ICBINB 工作坊版本：它把实验目录里的 idea、
+summary、图表和引用写成 4 页单栏 workshop paper，并用 LLM/VLM 多轮反思来压页、
+检查图文一致性、删除重复图、补充引用。
+
+相比通用 writeup，本文件更强调 “I Can't Believe It's Not Better” 场景：
+负结果、真实世界失败、pitfall 也可以是贡献；模板来自
+`ai_scientist/blank_icbinb_latex`；页数限制通过已编译 PDF 中 References 前的
+文本行数估算，而不是靠 Impact Statement。
+
+关键耦合点：
+- 输入目录需要 `research_idea.md` / `idea.md`、`logs/0-run/*_summary.json`、
+  `figures/*.png` 和 `auto_plot_aggregator.py`。
+- 引用收集依赖 Semantic Scholar，并缓存到 `cached_citations.bib`。
+- VLM 审查来自 perform_vlm_review.py，会在反思轮检查图、caption、正文引用、
+  重复图和图是否值得留在正文。
+- 运行会删除并重建 `base_folder/latex`，并删除旧的 reflection PDF。
+"""
+
 import argparse
 import json
 import os
@@ -31,6 +51,7 @@ from ai_scientist.vlm import create_client as create_vlm_client
 
 
 def remove_accents_and_clean(s):
+    """清理 BibTeX citation key，降低非 ASCII 或特殊字符导致的编译风险。"""
     # Normalize to separate accents
     nfkd_form = unicodedata.normalize("NFKD", s)
     # Remove non-ASCII characters
@@ -43,6 +64,7 @@ def remove_accents_and_clean(s):
 
 
 def compile_latex(cwd, pdf_file, timeout=30):
+    """运行 pdflatex/bibtex 编译 template.tex，并移动生成的 PDF。"""
     print("GENERATING LATEX")
 
     commands = [
@@ -114,7 +136,7 @@ def clean_lines(content):
     likely headers/footers or otherwise not part of the main content.
     """
     lines = content.splitlines()
-    # Keep only lines that are not detected as headers/footers.
+    # 页数估算只需要粗略正文行数，所以先去掉明显页眉页脚/页码行。
     return [line for line in lines if not is_header_or_footer(line)]
 
 
@@ -130,11 +152,11 @@ def detect_references_position_clean(pdf_file):
     if not osp.exists(pdf_file):
         return None
 
-    # Compile a regex pattern to match "REFERENCES" even if there are extra spaces
-    # between letters (and do a case-insensitive match).
+    # 这里按文本匹配 References 标题，允许字母间有空格。它不理解 PDF 结构，
+    # 如果正文里提前出现类似标题，可能误判。
     pattern = re.compile(r"\bR\s*E\s*F\s*E\s*R\s*E\s*N\s*C\s*E\s*S\b", re.IGNORECASE)
 
-    # Loop through pages (limit to 50 pages by default)
+    # 逐页抽文本，最多看前 50 页。这个上限足够论文场景，但不是通用 PDF 解析器。
     for page in range(1, 51):
         temp_dir = tempfile.mkdtemp()
         page_txt = osp.join(temp_dir, f"page_{page}.txt")
@@ -252,35 +274,30 @@ def check_page_limit(pdf_file, page_limit=4, timeout=30):
 
     If compilation or extraction fails, returns None.
     """
+    # 注意：这个函数并不编译 LaTeX，只检查调用方已经编译出来的 PDF。它把
+    # References 之前的清洗文本行数，与前 page_limit 页的可用行数做粗比较。
     try:
-        # Ensure the PDF was produced
         if not osp.exists(pdf_file):
             return None
 
-        # Locate the first occurrence of "References" using the cleaned extraction
         ref_pos = detect_references_position_clean(pdf_file)
         if ref_pos is None:
-            # If "References" isn't found, assume no reference section exists.
             return None
         ref_page, ref_line = ref_pos
 
-        # Determine up to which page we need to extract cleaned line counts:
         max_page_to_extract = max(page_limit, ref_page)
         page_line_counts = extract_page_line_counts(pdf_file, 1, max_page_to_extract)
         if not page_line_counts:
             return None
 
-        # Compute total cleaned lines available in the allowed pages (pages 1 to page_limit)
         allowed_lines = sum(
             page_line_counts.get(page, 0) for page in range(1, page_limit + 1)
         )
 
-        # Compute cleaned lines used before "References":
+        # used_lines 约等于主文占用行数。它是给 LLM 的压页反馈，不是会议系统的硬校验。
         used_lines = 0
-        # Sum full pages before the reference page
         for page in range(1, ref_page):
             used_lines += page_line_counts.get(page, 0)
-        # Add lines from the reference page up to (but not including) the line where "References" appears
         used_lines += ref_line - 1
 
         result = {
@@ -302,6 +319,7 @@ def check_page_limit(pdf_file, page_limit=4, timeout=30):
 
 
 def get_reflection_page_info(reflection_pdf, page_limit):
+    """把页数估算结果转成可直接放进 LLM reflection prompt 的文字。"""
     info = check_page_limit(reflection_pdf, page_limit)
     if info is not None:
         if "excess" in info:
@@ -337,6 +355,7 @@ def get_reflection_page_info(reflection_pdf, page_limit):
 def get_citation_addition(
     client, model, context, current_round, total_rounds, idea_text
 ):
+    """让 LLM 通过 Semantic Scholar 为 ICBINB 论文补一批引用。"""
     report, citations = context
     msg_history = []
     citation_system_msg_template = """You are an ambitious AI researcher who is looking to publish a paper to a workshop at ICLR 2025 that explores real-world pitfalls, failures, and challenges in deep learning.
@@ -649,6 +668,7 @@ def load_idea_text(base_folder):
     """
     Load the idea text from the base folder.
     """
+    # 兼容两种上游命名：新流程通常写 research_idea.md，旧流程可能只有 idea.md。
     idea_text = ""
     research_idea_path = osp.join(base_folder, "research_idea.md")
     if osp.exists(research_idea_path):
@@ -666,6 +686,8 @@ def load_exp_summaries(base_folder):
     """
     Load the experiment summaries from the base folder.
     """
+    # 这三个 summary 是写作事实来源；缺失或坏 JSON 会被替换成空对象，让流水线
+    # 尽量继续走，但论文质量会受影响。
     summary_files = [
         ("logs/0-run/baseline_summary.json", "BASELINE_SUMMARY"),
         ("logs/0-run/research_summary.json", "RESEARCH_SUMMARY"),
@@ -689,6 +711,7 @@ def load_exp_summaries(base_folder):
 
 
 def filter_experiment_summaries(exp_summaries, step_name):
+    """按下游阶段裁剪实验 summary，避免把不相关的大量日志塞进 prompt。"""
     if step_name == "citation_gathering":
         node_keys_to_keep = {
             "overall_plan",
@@ -731,6 +754,8 @@ def filter_experiment_summaries(exp_summaries, step_name):
                                 exp_summaries[stage_name][key][node_key]
                             )
         elif stage_name == "ABLATION_SUMMARY" and step_name == "plot_aggregation":
+            # 当前只有 plot aggregation 阶段保留 ablation summary；citation/writeup 阶段
+            # 会丢掉 ablation 细节，这是 prompt 长度和信息完整性的取舍。
             filtered_summaries[stage_name] = {}
             for ablation_summary in exp_summaries[stage_name]:
                 filtered_summaries[stage_name][ablation_summary["ablation_name"]] = {}
@@ -756,7 +781,7 @@ def gather_citations(base_folder, num_cite_rounds=20, small_model="gpt-4o-2024-0
         str: The gathered citations text, or None if failed
     """
 
-    # Paths for storing progress
+    # 引用收集可以恢复：每轮成功后写缓存和进度文件，避免长流程中断后从零开始。
     citations_cache_path = osp.join(base_folder, "cached_citations.bib")
     progress_path = osp.join(base_folder, "citations_progress.json")
 
@@ -779,7 +804,6 @@ def gather_citations(base_folder, num_cite_rounds=20, small_model="gpt-4o-2024-0
             citations_text = ""
 
     try:
-        # Load idea text and summaries
         idea_text = load_idea_text(base_folder)
         exp_summaries = load_exp_summaries(base_folder)
         filtered_summaries = filter_experiment_summaries(
@@ -787,7 +811,7 @@ def gather_citations(base_folder, num_cite_rounds=20, small_model="gpt-4o-2024-0
         )
         filtered_summaries_str = json.dumps(filtered_summaries, indent=2)
 
-        # Run small model for citation additions
+        # 小模型负责“找还缺什么引用”，真实检索由 Semantic Scholar 执行。
         client, client_model = create_client(small_model)
 
         for round_idx in range(current_round, num_cite_rounds):
@@ -814,7 +838,7 @@ def gather_citations(base_folder, num_cite_rounds=20, small_model="gpt-4o-2024-0
                     break
 
                 if addition is not None:
-                    # Simple check to avoid duplicating the same title
+                    # 这里只按 title 做简单去重，不等价于可靠的 BibTeX 去重。
                     title_match = re.search(r" title = {(.*?)}", addition)
                     if title_match:
                         new_title = title_match.group(1).lower()
@@ -864,10 +888,24 @@ def perform_writeup(
     n_writeup_reflections=3,
     page_limit=4,
 ):
+    """生成 ICBINB 风格 workshop paper 的主编排函数。
+
+    流程：
+    1. 清理旧 latex、目标 PDF 和 reflection PDF；
+    2. 读取 idea、裁剪后的 summary、figures、聚合绘图脚本；
+    3. 从缓存或 Semantic Scholar 收集引用并插入模板；
+    4. 用 VLM 描述 figures，再让大模型生成完整 template.tex；
+    5. 每轮编译 reflection PDF，调用 VLM 检查图文/重复图，估算 References 前页数，
+       再让 LLM 整文件修订 LaTeX；
+    6. 最后做一次最小压页反思并编译 final page-limit PDF。
+
+    这套页数限制是软约束：它依赖 PDF 文本抽取和 prompt 约束，不能保证最终一定
+    满足会议页数。
+    """
     pdf_file = osp.join(base_folder, f"{osp.basename(base_folder)}.pdf")
     latex_folder = osp.join(base_folder, "latex")
 
-    # Cleanup any previous latex folder and pdf
+    # 注意：这里会删除旧 latex 目录和旧 reflection PDF。它是生成流水线，不是只读分析。
     if osp.exists(latex_folder):
         shutil.rmtree(latex_folder)
     if osp.exists(pdf_file):
@@ -884,10 +922,9 @@ def perform_writeup(
         filtered_summaries_for_writeup = filter_experiment_summaries(
             exp_summaries, step_name="writeup"
         )
-        # Convert them to one big JSON string for context
         combined_summaries_str = json.dumps(filtered_summaries_for_writeup, indent=2)
 
-        # Prepare a new fresh latex folder
+        # ICBINB 版本使用单栏 workshop 模板，而不是通用 ICML 模板。
         if not osp.exists(osp.join(latex_folder, "template.tex")):
             shutil.copytree(
                 "ai_scientist/blank_icbinb_latex", latex_folder, dirs_exist_ok=True
@@ -897,7 +934,7 @@ def perform_writeup(
         with open(writeup_file, "r") as f:
             writeup_text = f.read()
 
-        # Gather plot filenames from figures/ folder
+        # 当前只识别 png。LaTeX 中省略扩展名或使用 pdf/jpg 图，会被后续正则当成坏引用。
         figures_dir = osp.join(base_folder, "figures")
         plot_names = []
         if osp.exists(figures_dir):
@@ -905,7 +942,7 @@ def perform_writeup(
                 if fplot.lower().endswith(".png"):
                     plot_names.append(fplot)
 
-        # Load aggregator script to include in the prompt
+        # 聚合脚本是写作上下文的一部分：它告诉大模型图表数据和 legend 是怎么来的。
         aggregator_path = osp.join(base_folder, "auto_plot_aggregator.py")
         aggregator_code = ""
         if osp.exists(aggregator_path):
@@ -918,7 +955,7 @@ def perform_writeup(
             compile_latex(latex_folder, pdf_file)
             return osp.exists(pdf_file)
 
-        # If no citations provided, try to load from cache first
+        # 引用优先级：调用方传入 > 本地缓存 > 现场收集。这样长流程可以复用前次结果。
         if citations_text is None:
             citations_cache_path = osp.join(base_folder, "cached_citations.bib")
             if osp.exists(citations_cache_path):
@@ -939,7 +976,8 @@ def perform_writeup(
                     print("Warning: Citation gathering failed")
                     citations_text = ""
 
-        # Insert citations into template.tex
+        # 模板必须包含 filecontents 环境；这里用字符串替换把 BibTeX 插到
+        # \end{filecontents} 前。
         if citations_text:
             with open(writeup_file, "r") as f:
                 content = f.read()
@@ -948,7 +986,7 @@ def perform_writeup(
             with open(writeup_file, "w") as f:
                 f.write(content)
 
-        # Generate VLM-based descriptions
+        # 先让 VLM 看每张图片，生成给写作模型看的文本描述。
         try:
             vlm_client, vlm_model = create_vlm_client(small_model)
             desc_map = {}
@@ -1009,12 +1047,12 @@ def perform_writeup(
         with open(writeup_file, "w") as f:
             f.write(updated_latex_code)
 
-        # Multiple reflection loops on the final LaTeX
+        # 反思轮把编译后的 PDF 交给 VLM 检查图文一致性、重复图和正文图选择；
+        # 同时把 chktex、坏图引用、页数估算反馈给 LLM。
         for i in range(n_writeup_reflections):
             with open(writeup_file, "r") as f:
                 current_latex = f.read()
 
-            # Check for unused or invalid figure references
             referenced_figs_temp = re.findall(
                 r"\\includegraphics(?:\[[^\]]*\])?{([^}]+)}", current_latex
             )
@@ -1027,21 +1065,20 @@ def perform_writeup(
             reflection_pdf = osp.join(
                 base_folder, f"{osp.basename(base_folder)}_reflection{i+1}.pdf"
             )
-            # Compile current version before reflection
             print(f"[green]Compiling PDF for reflection {i+1}...[/green]")
             compile_latex(latex_folder, reflection_pdf)
 
+            # VLM 检查依赖已编译 PDF，而不是 LaTeX 源文件。因此 LaTeX 编译失败会影响
+            # 后面的图文审查质量甚至导致异常。
             review_img_cap_ref = perform_imgs_cap_ref_review(
                 vlm_client, vlm_model, reflection_pdf
             )
 
-            # Detect duplicate figures between main text and appendix
             analysis_duplicate_figs = detect_duplicate_figures(
                 vlm_client, vlm_model, reflection_pdf
             )
             print(analysis_duplicate_figs)
 
-            # Get reflection_page_info
             reflection_page_info = get_reflection_page_info(reflection_pdf, page_limit)
 
             check_output = os.popen(  # TODO: should prob use subprocess instead
@@ -1099,6 +1136,7 @@ Ensure proper citation usage:
                 reflected_latex_code = reflection_code_match.group(1).strip()
                 if reflected_latex_code != current_latex:
                     final_text = reflected_latex_code
+                    # 修几个模型常见输出瑕疵：HTML 风格 begin/end、弯引号、裸百分号。
                     cleanup_map = {
                         "</end": r"\\end",
                         "</begin": r"\\begin",
@@ -1118,7 +1156,7 @@ Ensure proper citation usage:
             else:
                 print(f"No valid LaTeX code block found in reflection step {i+1}.")
                 break
-            # Get new reflection_page_info
+            # 第二段反思专门处理“哪些图该留在正文、移到附录、合并或删除”。
             reflection_page_info = get_reflection_page_info(reflection_pdf, page_limit)
             review_img_selection = perform_imgs_cap_ref_review_selection(
                 vlm_client, vlm_model, reflection_pdf, reflection_page_info
@@ -1186,10 +1224,8 @@ If you believe you are done with reflection, simply say: "I am done"."""
                 print(f"No valid LaTeX code block found in reflection step {i+1}.")
                 break
 
-        # Final reflection on page limit
-        # Save PDF with reflection
-
-        # Get new reflection_page_info
+        # 最后一轮只给页数压力，要求模型做最小改动。它依赖上一轮 msg_history 保留
+        # 完整上下文；单独拿出来运行并不自足。
         reflection_page_info = get_reflection_page_info(reflection_pdf, page_limit)
 
         final_reflection_prompt = """{reflection_page_info}
@@ -1243,6 +1279,7 @@ USE MINIMAL EDITS TO OPTIMIZE THE PAGE LIMIT USAGE."""
 
 
 if __name__ == "__main__":
+    # CLI 入口：通常在实验、绘图、引用准备好之后运行。
     parser = argparse.ArgumentParser(description="Perform writeup for a project")
     parser.add_argument("--folder", type=str, help="Project folder", required=True)
     parser.add_argument("--no-writing", action="store_true", help="Only generate")

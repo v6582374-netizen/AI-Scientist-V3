@@ -1,3 +1,22 @@
+"""General LaTeX writeup stage.
+
+这个文件负责把一个实验目录中的 idea、实验 summary、最终图表和引用资料，
+交给 LLM 写成完整 LaTeX 论文，并通过 LaTeX 编译和若干反思轮迭代修正。
+
+它并不是一个确定性的“论文生成算法”。更准确地说，它把固定目录结构里的上下文
+拼成 prompt，让模型整文件重写 `latex/template.tex`，再用 `pdflatex`、`bibtex`、
+`pdftotext`、`chktex` 和简单正则做有限约束。最终产物是编号 PDF 和更新后的
+LaTeX 目录。
+
+关键耦合点：
+- 输入目录通常来自 BFTS 实验流水线，包含 `research_idea.md` / `idea.md`、
+  `logs/0-run/*_summary.json`、`figures/*.png`、`auto_plot_aggregator.py`。
+- LaTeX 模板来自 `ai_scientist/blank_icml_latex`，并假设模板中有
+  `filecontents` 形式的 `references.bib`。
+- 引用收集依赖 Semantic Scholar；图片描述依赖 perform_vlm_review 和 VLM。
+- 运行会删除并重建 `base_folder/latex`，因此这个阶段有明显文件副作用。
+"""
+
 import argparse
 import json
 import os
@@ -23,6 +42,7 @@ from ai_scientist.vlm import create_client as create_vlm_client
 
 
 def remove_accents_and_clean(s):
+    """清理 BibTeX citation key，尽量避免 LaTeX/BibTeX 不稳定字符。"""
     # print("Original:", s)
     # Normalize to separate accents
     nfkd_form = unicodedata.normalize("NFKD", s)
@@ -37,6 +57,12 @@ def remove_accents_and_clean(s):
 
 
 def compile_latex(cwd, pdf_file, timeout=30):
+    """在 LaTeX 目录中编译 template.tex，并把 template.pdf 移到目标路径。
+
+    这是一个尽力而为的编译包装：它打印 stdout/stderr，但 subprocess.run 没有
+    `check=True`，所以单步 LaTeX 报错不一定会立刻中断；最终是否成功主要看
+    `template.pdf` 是否存在并能被移动。
+    """
     print("GENERATING LATEX")
 
     commands = [
@@ -85,6 +111,8 @@ def detect_pages_before_impact(latex_folder, timeout=30):
     the phrase "Impact Statement" appears.
     Returns a tuple (page_number, line_number) if found, otherwise None.
     """
+    # 这个函数通过临时复制 + 编译 + pdftotext 粗略估计正文页数，结果只用于
+    # 反思 prompt，不是严格排版校验。
     temp_dir = osp.join(latex_folder, f"_temp_compile_{uuid.uuid4().hex}")
     try:
         shutil.copytree(latex_folder, temp_dir, dirs_exist_ok=True)
@@ -149,6 +177,15 @@ def detect_pages_before_impact(latex_folder, timeout=30):
 def get_citation_addition(
     client, model, context, current_round, total_rounds, idea_text
 ):
+    """让 LLM 借助 Semantic Scholar 追加一批 BibTeX 引用。
+
+    两段式流程：
+    1. LLM 根据 idea、实验 summary 和当前 references.bib 提出一个搜索 query；
+    2. 程序实际调用 Semantic Scholar，再让 LLM 从结果中选择要加入的论文。
+
+    返回的是可以直接插入 references.bib 的文本块；去重只做了简单 title regex，
+    因此它是防重复提示，不是可靠的文献管理器。
+    """
     report, citations = context
     msg_history = []
     citation_system_msg_template = """You are an ambitious AI researcher who is looking to publish a paper to a top-tier ML conference that will contribute significantly to the field.
@@ -461,18 +498,31 @@ def perform_writeup(
     n_writeup_reflections=3,
     page_limit=8,
 ):
+    """把实验目录写成一篇通用 ICML 风格 LaTeX/PDF 论文。
+
+    主流程：
+    1. 清理并重建 `base_folder/latex`；
+    2. 读取 idea、summary、figures 和 `auto_plot_aggregator.py`；
+    3. 用小模型和 Semantic Scholar 补 references.bib；
+    4. 用 VLM 给现有 figures 生成图像描述；
+    5. 用大模型整文件生成 `template.tex`；
+    6. 编译、检查 figure 引用/chktex/页数，再多轮要求大模型修订完整 LaTeX。
+
+    注意：`no_writing=True` 也会清理并复制 LaTeX 模板，然后只编译模板；它不是
+    “完全不动文件”的 dry-run。
+    """
     compile_attempt = 0
     base_pdf_file = osp.join(base_folder, f"{osp.basename(base_folder)}")
     latex_folder = osp.join(base_folder, "latex")
 
-    # Cleanup any previous latex folder and pdf
+    # 这个阶段会删除旧 latex 目录。若用户手动改过 base_folder/latex，需要先备份。
     if osp.exists(latex_folder):
         shutil.rmtree(latex_folder)
     # if osp.exists(pdf_file):
     #     os.remove(pdf_file)
 
     try:
-        # Load idea text
+        # idea 是写作的高层动机；这里优先读 research_idea.md，兼容旧流程的 idea.md。
         idea_text = ""
         research_idea_path = osp.join(base_folder, "research_idea.md")
         if osp.exists(research_idea_path):
@@ -484,7 +534,8 @@ def perform_writeup(
                 with open(idea_md_path, "r") as f_idea:
                     idea_text = f_idea.read()
 
-        # Load summaries
+        # 三个 summary 是实验事实来源。模型应从这些 JSON 中提取方法、结果和分析，
+        # 而不是在论文里编造未运行过的实验。
         summary_files = [
             ("logs/0-run/baseline_summary.json", "BASELINE_SUMMARY"),
             ("logs/0-run/research_summary.json", "RESEARCH_SUMMARY"),
@@ -505,10 +556,9 @@ def perform_writeup(
             else:
                 loaded_summaries[key] = {}
 
-        # Convert them to one big JSON string for context
         combined_summaries_str = json.dumps(loaded_summaries, indent=2)
 
-        # Prepare a new fresh latex folder
+        # 模板路径是相对仓库根目录写死的；从其他 cwd 直接运行可能找不到模板。
         if not osp.exists(osp.join(latex_folder, "template.tex")):
             shutil.copytree(
                 "ai_scientist/blank_icml_latex", latex_folder, dirs_exist_ok=True
@@ -518,7 +568,7 @@ def perform_writeup(
         with open(writeup_file, "r") as f:
             writeup_text = f.read()
 
-        # Gather plot filenames from figures/ folder
+        # 下游 LaTeX 只看到 figures/ 下的 png 文件名；模板的 graphicspath 负责定位目录。
         figures_dir = osp.join(base_folder, "figures")
         plot_names = []
         if osp.exists(figures_dir):
@@ -526,7 +576,7 @@ def perform_writeup(
                 if fplot.lower().endswith(".png"):
                     plot_names.append(fplot)
 
-        # Load aggregator script to include in the prompt
+        # aggregator 脚本解释最终图是如何从实验数据生成的，不只是临时产物。
         aggregator_path = osp.join(base_folder, "auto_plot_aggregator.py")
         aggregator_code = ""
         if osp.exists(aggregator_path):
@@ -539,7 +589,7 @@ def perform_writeup(
             compile_latex(latex_folder, base_pdf_file + ".pdf")
             return osp.exists(base_pdf_file + ".pdf")
 
-        # Run small model for citation additions
+        # 引用收集发生在正文生成之前，依据是 idea 和 summary，而不是最终 manuscript。
         client, client_model = create_client(small_model)
         for round_idx in range(num_cite_rounds):
             with open(writeup_file, "r") as f:
@@ -567,7 +617,7 @@ def perform_writeup(
                     break
 
                 if addition is not None:
-                    # Simple check to avoid duplicating the same title
+                    # 这里只用 title 做很脆的去重；BibTeX 字段格式稍变就可能漏掉重复。
                     title_match = re.search(r" title = {(.*?)}", addition)
                     if title_match:
                         new_title = title_match.group(1).lower()
@@ -587,7 +637,7 @@ def perform_writeup(
                 print(traceback.format_exc())
                 continue
 
-        # Generate VLM-based descriptions but do not overwrite plot_names
+        # VLM 图像描述给大模型一个“图里到底有什么”的文本代理，避免只凭文件名写 caption。
         try:
             vlm_client, vlm_model = create_vlm_client(small_model)
             desc_map = {}
@@ -618,7 +668,7 @@ def perform_writeup(
             print(traceback.format_exc())
             plot_descriptions_str = "No descriptions available."
 
-        # Construct final prompt for big model, placing the figure descriptions alongside the plot list
+        # 大模型不是增量 patch，而是返回完整 template.tex；后面会整体覆盖模板文件。
         big_model_system_message = writeup_system_message_template.format(
             page_limit=page_limit
         )
@@ -650,12 +700,13 @@ def perform_writeup(
         with open(writeup_file, "w") as f:
             f.write(updated_latex_code)
 
-        # Multiple reflection loops on the final LaTeX
+        # 反思轮的校验是轻量的：编译、chktex、图文件名比对、Impact Statement 位置。
+        # 它不能证明论文科学正确，只能把常见格式/引用/页数问题反馈给模型。
         for i in range(n_writeup_reflections):
             with open(writeup_file, "r") as f:
                 current_latex = f.read()
 
-            # Check for unused or invalid figure references
+            # 用 includegraphics 的 basename 和 figures/ 文件名做集合比较，找未用图和坏引用。
             referenced_figs_temp = re.findall(
                 r"\\includegraphics(?:\[[^\]]*\])?{([^}]+)}", current_latex
             )
@@ -728,6 +779,7 @@ If you believe you are done, simply say: "I am done".
                 reflected_latex_code = reflection_code_match.group(1).strip()
                 if reflected_latex_code != current_latex:
                     final_text = reflected_latex_code
+                    # 修几个模型常见输出瑕疵：HTML 风格的 begin/end、弯引号、裸百分号。
                     cleanup_map = {
                         "</end": r"\\end",
                         "</begin": r"\\begin",
@@ -761,6 +813,8 @@ If you believe you are done, simply say: "I am done".
 
 
 if __name__ == "__main__":
+    # CLI 入口：通常由 launch_scientist_bfts.py 在实验流水线后半段调用，也可手动指定
+    # 一个已完成实验的 folder 运行。
     parser = argparse.ArgumentParser(description="Perform writeup for a project")
     parser.add_argument("--folder", type=str, help="Project folder", required=True)
     parser.add_argument("--no-writing", action="store_true", help="Only generate")

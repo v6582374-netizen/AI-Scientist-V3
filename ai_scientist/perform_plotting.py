@@ -1,3 +1,22 @@
+"""Final plot aggregation stage.
+
+这个文件负责把一次实验目录中的 baseline / research / ablation summary，
+以及 `research_idea.md`，交给 LLM 生成一个可执行的绘图汇总脚本
+`auto_plot_aggregator.py`。生成出来的脚本会读取已有 `.npy` 结果和 JSON
+摘要，把最终论文要用的图保存到实验目录下的 `figures/`。
+
+这里的“画图智能”不是内置绘图库逻辑，而是一个 LLM 写脚本、程序执行脚本、
+再把执行结果反馈给 LLM 反思修正的闭环。后续 writeup 阶段只会看
+`figures/` 里的图和 `auto_plot_aggregator.py`，因此本文件是实验结果到论文
+图表之间的桥。
+
+关键耦合点：
+- perform_icbinb_writeup.load_idea_text / load_exp_summaries /
+  filter_experiment_summaries 负责读取并裁剪实验摘要。
+- ai_scientist.llm.create_client / get_response_from_llm 负责实际调用模型。
+- 产物 `figures/*.png` 和 `auto_plot_aggregator.py` 会被 writeup 阶段读取。
+"""
+
 import argparse
 import json
 import os
@@ -18,6 +37,10 @@ from ai_scientist.perform_icbinb_writeup import (
 
 MAX_FIGURES = 12
 
+# 这是给“绘图脚本生成器”的系统提示。它把 LLM 的任务限定为：
+# 只基于已有实验数据和摘要写一个独立 Python 脚本，不凭空编数据，也不要把图
+# 放到 `figures/` 之外的位置。
+# 注意 MAX_FIGURES 只是 prompt 里的软约束；代码不会强制删除超额图片。
 AGGREGATOR_SYSTEM_MSG = f"""You are an ambitious AI researcher who is preparing final plots for a scientific paper submission.
 You have multiple experiment summaries (baseline, research, ablation), each possibly containing references to different plots or numerical insights.
 There is also a top-level 'research_idea.md' file that outlines the overarching research direction.
@@ -50,6 +73,7 @@ Your output should be the entire Python aggregator script in triple backticks.
 
 
 def build_aggregator_prompt(combined_summaries_str, idea_text):
+    """把实验摘要和研究 idea 组装成让 LLM 写绘图脚本的用户 prompt。"""
     return f"""
 We have three JSON summaries of scientific experiments: baseline, research, ablation.
 They may contain lists of figure descriptions, code to generate the figures, and paths to the .npy files containing the numerical results.
@@ -99,9 +123,13 @@ def extract_code_snippet(text: str) -> str:
 def run_aggregator_script(
     aggregator_code, aggregator_script_path, base_folder, script_name
 ):
+    """把 LLM 生成的 Python 代码落盘并在实验目录中执行。"""
     if not aggregator_code.strip():
         print("No aggregator code was provided. Skipping aggregator script run.")
         return ""
+
+    # 这里写出的脚本是本阶段最重要的可追踪产物：后续 writeup 会把它读进 prompt，
+    # 用来理解每张图是怎么由实验数据生成的。
     with open(aggregator_script_path, "w") as f:
         f.write(aggregator_code)
 
@@ -136,11 +164,20 @@ def run_aggregator_script(
 def aggregate_plots(
     base_folder: str, model: str = "o1-2024-12-17", n_reflections: int = 5
 ) -> None:
+    """为一个实验目录生成最终论文图表。
+
+    流程是：
+    1. 清理旧的聚合脚本和 figures 目录；
+    2. 读取 idea 与实验 summary，并裁剪出绘图需要的字段；
+    3. 让 LLM 写 `auto_plot_aggregator.py`；
+    4. 执行脚本生成 figures；
+    5. 把脚本输出和图数量反馈给 LLM，最多反思修正 n_reflections 轮。
+    """
     filename = "auto_plot_aggregator.py"
     aggregator_script_path = os.path.join(base_folder, filename)
     figures_dir = os.path.join(base_folder, "figures")
 
-    # Clean up previous files
+    # 每次重新聚合图表时先清理旧产物，避免 writeup 阶段误读过期图片。
     if os.path.exists(aggregator_script_path):
         os.remove(aggregator_script_path)
     if os.path.exists(figures_dir):
@@ -152,13 +189,13 @@ def aggregate_plots(
     filtered_summaries_for_plot_agg = filter_experiment_summaries(
         exp_summaries, step_name="plot_aggregation"
     )
-    # Convert them to one big JSON string for context
+    # plot_aggregation 会保留 plot_code、plot_analyses、npy 路径等字段；这些是 LLM
+    # 写汇总绘图脚本时真正需要的上下文。
     combined_summaries_str = json.dumps(filtered_summaries_for_plot_agg, indent=2)
 
-    # Build aggregator prompt
     aggregator_prompt = build_aggregator_prompt(combined_summaries_str, idea_text)
 
-    # Call LLM
+    # 第一次 LLM 调用只负责产出完整 Python 脚本；脚本能否运行由下一步实际执行验证。
     client, model_name = create_client(model)
     response, msg_history = None, []
     try:
@@ -182,14 +219,14 @@ def aggregate_plots(
         )
         return
 
-    # First run of aggregator script
+    # 先执行一次脚本，拿到 stdout/stderr；后面的反思轮会基于真实执行结果修脚本。
     aggregator_out = run_aggregator_script(
         aggregator_code, aggregator_script_path, base_folder, filename
     )
 
-    # Multiple reflection loops
+    # 多轮反思不是让 LLM “评价图好不好看”这么简单，而是把脚本运行结果、图数量、
+    # 常见绘图要求重新喂给它，让它修正缺图、重复图、文件名/legend/label 等问题。
     for i in range(n_reflections):
-        # Check number of figures
         figure_count = 0
         if os.path.exists(figures_dir):
             figure_count = len(
@@ -200,7 +237,6 @@ def aggregate_plots(
                 ]
             )
         print(f"[{i + 1} / {n_reflections}]: Number of figures: {figure_count}")
-        # Reflection prompt with reminder for common checks and early exit
         reflection_prompt = f"""We have run your aggregator script and it produced {figure_count} figure(s). The script's output is:
 ```
 {aggregator_out}
@@ -232,14 +268,16 @@ If you believe you are done, simply say: "I am done". Otherwise, please provide 
             print("Failed to get reflection from LLM.")
             return
 
-        # Early-exit check
+        # 只有已经生成过至少一张图时才接受 “I am done”，避免空 figures 被误判成功。
         if figure_count > 0 and "I am done" in reflection_response:
             print("LLM indicated it is done with reflections. Exiting reflection loop.")
             break
 
         aggregator_new_code = extract_code_snippet(reflection_response)
 
-        # If new code is provided and differs, run again
+        # 如果 LLM 给了新版脚本，就覆盖旧脚本并重新执行；否则保留当前结果。
+        # 这里不会在每轮反思前清空 figures/，所以旧图可能残留并影响 figure_count；
+        # 读结果时要把它看作“LLM 写脚本 + 轻量执行反馈”的软约束流程。
         if (
             aggregator_new_code.strip()
             and aggregator_new_code.strip() != aggregator_code.strip()
@@ -255,6 +293,7 @@ If you believe you are done, simply say: "I am done". Otherwise, please provide 
 
 
 def main():
+    """命令行入口：对指定实验目录运行图表聚合阶段。"""
     parser = argparse.ArgumentParser(
         description="Generate and execute a final plot aggregation script with LLM assistance."
     )
