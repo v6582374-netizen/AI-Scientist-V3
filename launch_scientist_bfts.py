@@ -2,30 +2,24 @@ import os.path as osp
 import json
 import argparse
 import shutil
-import torch
 import os
 import re
 import sys
 from datetime import datetime
-from ai_scientist.llm import create_client
 
 from contextlib import contextmanager
-from ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager import (
-    perform_experiments_bfts,
+from ai_scientist.research_profile.budgets import valid_budget_profile_ids
+from ai_scientist.research_profile.domains import valid_domain_ids
+from ai_scientist.research_profile.execution_backends import (
+    valid_execution_backend_ids,
 )
-from ai_scientist.treesearch.bfts_utils import (
-    idea_to_markdown,
-    edit_bfts_config_file,
+from ai_scientist.research_profile.prompting import build_review_system_prompt
+from ai_scientist.research_profile.schema import (
+    apply_profile_overrides,
+    select_idea,
+    validate_idea_envelope,
+    validate_research_profile,
 )
-from ai_scientist.perform_plotting import aggregate_plots
-from ai_scientist.perform_writeup import perform_writeup
-from ai_scientist.perform_icbinb_writeup import (
-    perform_writeup as perform_icbinb_writeup,
-    gather_citations,
-)
-from ai_scientist.perform_llm_review import perform_review, load_paper
-from ai_scientist.perform_vlm_review import perform_imgs_cap_ref_review
-from ai_scientist.utils.token_tracker import token_tracker
 
 
 def print_time():
@@ -33,6 +27,8 @@ def print_time():
 
 
 def save_token_tracker(idea_dir):
+    from ai_scientist.utils.token_tracker import token_tracker
+
     with open(osp.join(idea_dir, "token_tracker.json"), "w") as f:
         json.dump(token_tracker.get_summary(), f)
     with open(osp.join(idea_dir, "token_tracker_interactions.json"), "w") as f:
@@ -51,7 +47,7 @@ def parse_arguments():
     parser.add_argument(
         "--load_ideas",
         type=str,
-        default="ideas/i_cant_believe_its_not_better.json",
+        required=True,
         help="Path to a JSON file containing pregenerated ideas",
     )
     parser.add_argument(
@@ -128,13 +124,51 @@ def parse_arguments():
         action="store_true",
         help="If set, skip the review process",
     )
+    parser.add_argument(
+        "--domain",
+        type=str,
+        default="auto",
+        choices=["auto", *valid_domain_ids()],
+        help="Override the domain selected during ideation.",
+    )
+    parser.add_argument(
+        "--execution-backend",
+        type=str,
+        default="auto",
+        choices=["auto", *valid_execution_backend_ids()],
+        help="Override the execution backend selected during ideation.",
+    )
+    parser.add_argument(
+        "--budget-profile",
+        type=str,
+        default="auto",
+        choices=["auto", *valid_budget_profile_ids()],
+        help="Override the static resource budget selected during ideation.",
+    )
     return parser.parse_args()
 
 
 def get_available_gpus(gpu_ids=None):
     if gpu_ids is not None:
         return [int(gpu_id) for gpu_id in gpu_ids.split(",")]
-    return list(range(torch.cuda.device_count()))
+    try:
+        import torch
+
+        return list(range(torch.cuda.device_count()))
+    except Exception:
+        return []
+
+
+def validate_launch_options(args, research_profile):
+    research_profile = validate_research_profile(research_profile)
+    if research_profile["domain"]["id"] != "general":
+        return
+
+    if args.load_code or args.add_dataset_ref or args.writeup_type == "icbinb":
+        raise ValueError(
+            "ML-oriented launch options (--load_code, --add_dataset_ref, "
+            "--writeup-type icbinb) cannot be used with domain=general."
+        )
 
 
 def find_pdf_path_for_review(idea_dir):
@@ -184,15 +218,44 @@ if __name__ == "__main__":
     os.environ["AI_SCIENTIST_ROOT"] = os.path.dirname(os.path.abspath(__file__))
     print(f"Set AI_SCIENTIST_ROOT to {os.environ['AI_SCIENTIST_ROOT']}")
 
-    # Check available GPUs and adjust parallel processes if necessary
+    with open(args.load_ideas, "r") as f:
+        idea_envelope = validate_idea_envelope(json.load(f))
+    research_profile = apply_profile_overrides(
+        idea_envelope["research_profile"],
+        domain=args.domain,
+        execution_backend=args.execution_backend,
+        budget_profile=args.budget_profile,
+    )
+    validate_launch_options(args, research_profile)
+    ideas = idea_envelope["ideas"]
+    idea = select_idea(idea_envelope, args.idea_idx)
+    print(f"Loaded {len(ideas)} pregenerated ideas from {args.load_ideas}")
+    print("Research Profile:")
+    print(json.dumps(research_profile, indent=2))
+
+    if research_profile["execution"]["backend"] != "local_gpu_cuda_limited":
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
+    # Check available GPUs and adjust parallel processes if necessary.
     available_gpus = get_available_gpus()
     print(f"Using GPUs: {available_gpus}")
 
-    with open(args.load_ideas, "r") as f:
-        ideas = json.load(f)
-        print(f"Loaded {len(ideas)} pregenerated ideas from {args.load_ideas}")
-
-    idea = ideas[args.idea_idx]
+    from ai_scientist.llm import create_client
+    from ai_scientist.perform_icbinb_writeup import (
+        gather_citations,
+        perform_writeup as perform_icbinb_writeup,
+    )
+    from ai_scientist.perform_llm_review import load_paper, perform_review
+    from ai_scientist.perform_plotting import aggregate_plots
+    from ai_scientist.perform_vlm_review import perform_imgs_cap_ref_review
+    from ai_scientist.perform_writeup import perform_writeup
+    from ai_scientist.treesearch.bfts_utils import (
+        edit_bfts_config_file,
+        idea_to_markdown,
+    )
+    from ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager import (
+        perform_experiments_bfts,
+    )
 
     date = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     idea_dir = f"experiments/{date}_{idea['Name']}_attempt_{args.attempt_id}"
@@ -214,7 +277,7 @@ if __name__ == "__main__":
     else:
         code_path = None
 
-    idea_to_markdown(ideas[args.idea_idx], idea_path_md, code_path)
+    idea_to_markdown(idea, idea_path_md, code_path)
 
     dataset_ref_code = None
     if args.add_dataset_ref:
@@ -239,18 +302,19 @@ if __name__ == "__main__":
 
     # Add code to idea json if it was loaded
     if added_code is not None:
-        ideas[args.idea_idx]["Code"] = added_code
+        idea["Code"] = added_code
 
     # Store raw idea json
     idea_path_json = osp.join(idea_dir, "idea.json")
     with open(idea_path_json, "w") as f:
-        json.dump(ideas[args.idea_idx], f, indent=4)
+        json.dump(idea, f, indent=4)
 
     config_path = "bfts_config.yaml"
     idea_config_path = edit_bfts_config_file(
         config_path,
         idea_dir,
         idea_path_json,
+        research_profile=research_profile,
     )
 
     perform_experiments_bfts(idea_config_path)
@@ -308,7 +372,17 @@ if __name__ == "__main__":
             print("Paper found at: ", pdf_path)
             paper_content = load_paper(pdf_path)
             client, client_model = create_client(args.model_review)
-            review_text = perform_review(paper_content, client_model, client)
+            review_kwargs = {
+                "reviewer_system_prompt": build_review_system_prompt(research_profile)
+            }
+            if research_profile["domain"]["id"] == "general":
+                review_kwargs["num_fs_examples"] = 0
+            review_text = perform_review(
+                paper_content,
+                client_model,
+                client,
+                **review_kwargs,
+            )
             review_img_cap_ref = perform_imgs_cap_ref_review(
                 client, client_model, pdf_path
             )

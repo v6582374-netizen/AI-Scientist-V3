@@ -5,7 +5,6 @@ import subprocess
 import os
 from queue import Queue
 import logging
-import humanize
 from .backend import FunctionSpec, compile_prompt_to_md, query
 from .interpreter import ExecutionResult
 from .journal import Journal, Node
@@ -22,6 +21,12 @@ from rich import print
 from pathlib import Path
 import base64
 import sys
+from ai_scientist.research_profile.planner import plan_research_profile
+from ai_scientist.research_profile.prompting import (
+    build_environment_prompt,
+    build_experiment_prompt_sections,
+)
+from ai_scientist.research_profile.schema import validate_research_profile
 
 logger = logging.getLogger("ai-scientist")
 
@@ -271,127 +276,37 @@ class MinimalAgent:
         self.data_preview = None
 
     @property
-    def _prompt_environment(self):
-        pkgs = [
-            "numpy",
-            "pandas",
-            "scikit-learn",
-            "statsmodels",
-            "xgboost",
-            "lightGBM",
-            "torch",
-            "torchvision",
-            "torch-geometric",
-            "bayesian-optimization",
-            "timm",
-            "albumentations",
-        ]
-        random.shuffle(pkgs)
-        pkg_str = ", ".join([f"`{p}`" for p in pkgs])
+    def research_profile(self):
+        profile = None
+        if hasattr(self.cfg, "get"):
+            profile = self.cfg.get("research_profile", None)
+        if profile is None:
+            profile = getattr(self.cfg, "research_profile", None)
+        if profile is None:
+            profile = plan_research_profile(
+                str(self.task_desc),
+                domain="general",
+                execution_backend="local_cpu_limited",
+                budget_profile="small",
+                cuda_available=False,
+            )
+        return validate_research_profile(profile)
 
-        env_prompt = {
-            "Installed Packages": f"Your solution can use any relevant machine learning packages such as: {pkg_str}. Feel free to use any other packages too (all packages are already installed!). For neural networks we suggest using PyTorch rather than TensorFlow."
-        }
-        return env_prompt
+    @property
+    def _prompt_environment(self):
+        return build_environment_prompt(self.research_profile)
 
     @property
     def _prompt_impl_guideline(self):
-        impl_guideline = [
-            "CRITICAL GPU REQUIREMENTS - Your code MUST include ALL of these:",
-            "  - At the start of your code, add these lines to handle GPU/CPU:",
-            "    ```python",
-            "    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')",
-            "    print(f'Using device: {device}')",
-            "    ```",
-            "  - ALWAYS move models to device using the `.to(device)` method",
-            "  - ALWAYS move input tensors to device using the `.to(device)` method",
-            "  - ALWAYS move model related tensors to device using the `.to(device)` method",
-            "  - For optimizers, create them AFTER moving model to device",
-            "  - When using DataLoader, move batch tensors to device in training loop: `batch = {k: v.to(device) for k, v in batch.items() if isinstance(v, torch.Tensor)}`",
-            "CRITICAL MODEL INPUT GUIDELINES:",
-            "  - Always pay extra attention to the input to the model being properly normalized",
-            "  - This is extremely important because the input to the model's forward pass directly affects the output, and the loss function is computed based on the output",
-        ]
-        if hasattr(self.cfg.experiment, "num_syn_datasets"):
-            num_syn_datasets = self.cfg.experiment.num_syn_datasets
-            if num_syn_datasets > 1:
-                impl_guideline.extend(
-                    [
-                        f"You MUST evaluate your solution on at least {num_syn_datasets} different synthetic datasets to ensure robustness:",
-                        "  - Use standard benchmark datasets when available",
-                        f"  - If using synthetic data, generate at least {num_syn_datasets} variants with different characteristics",
-                        "  - Report metrics separately for each dataset",
-                        "  - Compute and report the average metric across all datasets",
-                    ]
-                )
-        impl_guideline.extend(
-            [
-                "For generative modeling tasks, you must:",
-                "  - Generate a set of samples from your model",
-                "  - Compare these samples with ground truth data using appropriate visualizations",
-                "  - When saving plots, always use the 'working_dir' variable that will be defined at the start of the script",
-                "  - Make sure to give each figure a unique and appropriate name based on the dataset it represents, rather than reusing the same filename.",
-                "Important code structure requirements:",
-                "  - Do NOT put any execution code inside 'if __name__ == \"__main__\":' block",
-                "  - All code should be at the global scope or in functions that are called from the global scope",
-                "  - The script should execute immediately when run, without requiring any special entry point",
-                "The code should start with:",
-                "  import os",
-                "  working_dir = os.path.join(os.getcwd(), 'working')",
-                "  os.makedirs(working_dir, exist_ok=True)",
-                "The code should be a single-file python program that is self-contained and can be executed as-is.",
-                "No parts of the code should be skipped, don't terminate the code execution before finishing the script.",
-                "Your response should only contain a single code block.",
-                f"Be aware of the running time of the code, it should complete within {humanize.naturaldelta(self.cfg.exec.timeout)}.",
-                'You can also use the "./working" directory to store any temporary files that your code needs to create.',
-                "Data saving requirements:",
-                "- Save all plottable data (metrics, losses, predictions, etc.) as numpy arrays using np.save()",
-                "- Use the following naming convention for saved files:",
-                "  ```python",
-                "  # At the start of your code",
-                "  experiment_data = {",
-                "      'dataset_name_1': {",
-                "          'metrics': {'train': [], 'val': []},",
-                "          'losses': {'train': [], 'val': []},",
-                "          'predictions': [],",
-                "          'ground_truth': [],",
-                "          # Add other relevant data",
-                "      },",
-                "      # Add additional datasets as needed:",
-                "      'dataset_name_2': {",
-                "          'metrics': {'train': [], 'val': []},",
-                "          'losses': {'train': [], 'val': []},",
-                "          'predictions': [],",
-                "          'ground_truth': [],",
-                "          # Add other relevant data",
-                "      },",
-                "  }",
-                "  # During training/evaluation:",
-                "  experiment_data['dataset_name_1']['metrics']['train'].append(train_metric)",
-                "  ```",
-                "- Include timestamps or epochs with the saved metrics",
-                "- For large datasets, consider saving in chunks or using np.savez_compressed()",
-                "CRITICAL EVALUATION REQUIREMENTS - Your code MUST include ALL of these:",
-                "  1. Track and print validation loss at each epoch or at suitable intervals:",
-                "     ```python",
-                "     print(f'Epoch {{epoch}}: validation_loss = {{val_loss:.4f}}')",
-                "     ```",
-                "  2. Track and update ALL these additional metrics: "
-                + str(self.evaluation_metrics),
-                "  3. Update metrics at EACH epoch:",
-                "  4. Save ALL metrics at the end:",
-                "     ```python",
-                "     np.save(os.path.join(working_dir, 'experiment_data.npy'), experiment_data)",
-                "     ```",
-            ]
+        num_syn_datasets = getattr(self.cfg.experiment, "num_syn_datasets", 1)
+        k_fold_validation = getattr(self.cfg.agent, "k_fold_validation", 1)
+        return build_experiment_prompt_sections(
+            self.research_profile,
+            timeout_seconds=int(self.cfg.exec.timeout),
+            evaluation_metrics=self.evaluation_metrics,
+            num_syn_datasets=num_syn_datasets,
+            k_fold_validation=k_fold_validation,
         )
-
-        if self.cfg.agent.k_fold_validation > 1:
-            impl_guideline.append(
-                f"The evaluation should be based on {self.cfg.agent.k_fold_validation}-fold cross-validation but only if that's an appropriate evaluation for the task at hand."
-            )
-
-        return {"Implementation guideline": impl_guideline}
 
     @property
     def _prompt_resp_fmt(self):
@@ -454,8 +369,8 @@ class MinimalAgent:
         prompt: Any = {
             "Introduction": (
                 "You are an AI researcher who is looking to publish a paper that will contribute significantly to the field."
-                "Your first task is to write a python code to implement a solid baseline based on your research idea provided below, "
-                "from data preparation to model training, as well as evaluation and visualization. "
+                "Your first task is to write python code to implement a solid initial validation based on your research idea provided below, "
+                "from data preparation or analysis to evaluation and visualization. "
                 "Focus on getting a simple but working implementation first, before any sophisticated improvements. "
                 "We will explore more advanced variations in later stages."
             ),
@@ -1283,7 +1198,7 @@ class ParallelAgent:
 
             # Add seed to node code
             node_data["code"] = (
-                f"# Set random seed\nimport random\nimport numpy as np\nimport torch\n\nseed = {seed}\nrandom.seed(seed)\nnp.random.seed(seed)\ntorch.manual_seed(seed)\nif torch.cuda.is_available():\n    torch.cuda.manual_seed(seed)\n\n"
+                f"# Set random seed\nimport random\nimport numpy as np\n\nseed = {seed}\nrandom.seed(seed)\nnp.random.seed(seed)\ntry:\n    import torch\nexcept Exception:\n    torch = None\nif torch is not None:\n    torch.manual_seed(seed)\n    if torch.cuda.is_available():\n        torch.cuda.manual_seed(seed)\n\n"
                 + node_code
             )
 

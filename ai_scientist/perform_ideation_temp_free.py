@@ -30,6 +30,18 @@ from ai_scientist.llm import (
     create_client,
     get_response_from_llm,
 )
+from ai_scientist.research_profile.budgets import valid_budget_profile_ids
+from ai_scientist.research_profile.domains import valid_domain_ids
+from ai_scientist.research_profile.execution_backends import (
+    valid_execution_backend_ids,
+)
+from ai_scientist.research_profile.planner import plan_research_profile
+from ai_scientist.research_profile.prompting import build_ideation_system_prompt
+from ai_scientist.research_profile.schema import (
+    make_idea_envelope,
+    validate_idea_envelope,
+    validate_research_profile,
+)
 
 from ai_scientist.tools.semantic_scholar import SemanticScholarSearchTool
 from ai_scientist.tools.base_tool import BaseTool
@@ -81,46 +93,17 @@ tool_names = [
 ]
 tool_names_str = ", ".join(tool_names)
 
-# system_prompt 是整个 agent 循环的“协议层”：
-# 1. 规定 LLM 的角色和 idea 质量标准；
-# 2. 告诉它可以使用哪些工具；
-# 3. 强制它返回 ACTION / ARGUMENTS，方便程序用正则和 JSON 自动解析。
-system_prompt = f"""You are an experienced AI researcher who aims to propose high-impact research ideas resembling exciting grant proposals. Feel free to propose any novel ideas or experiments; make sure they are novel. Be very creative and think out of the box. Each proposal should stem from a simple and elegant question, observation, or hypothesis about the topic. For example, they could involve very interesting and simple interventions or investigations that explore new possibilities or challenge existing assumptions. Clearly clarify how the proposal distinguishes from the existing literature.
-
-Ensure that the proposal does not require resources beyond what an academic lab could afford. These proposals should lead to papers that are publishable at top ML conferences.
-
-You have access to the following tools:
-
-{tool_descriptions}
-
-Respond in the following format:
-
-ACTION:
-<The action to take, exactly one of {tool_names_str}>
-
-ARGUMENTS:
-<If ACTION is "SearchSemanticScholar", provide the search query as {{"query": "your search query"}}. If ACTION is "FinalizeIdea", provide the idea details as {{"idea": {{ ... }}}} with the IDEA JSON specified below.>
-
-If you choose to finalize your idea, provide the IDEA JSON in the arguments:
-
-IDEA JSON:
-```json
-{{
-  "idea": {{
-    "Name": "...",
-    "Title": "...",
-    "Short Hypothesis": "...",
-    "Related Work": "...",
-    "Abstract": "...",
-    "Experiments": "...",
-    "Risk Factors and Limitations": "..."
-  }}
-}}
-```
-
-Ensure the JSON is properly formatted for automatic parsing.
-
-Note: You should perform at least one literature search before finalizing your idea to ensure it is well-informed by existing research."""
+def build_system_prompt(research_profile: Dict[str, Any]) -> str:
+    # system_prompt 是整个 agent 循环的“协议层”：
+    # 1. 规定 LLM 的角色和 idea 质量标准；
+    # 2. 注入 Research Profile 中的领域、执行和证据约束；
+    # 3. 告诉它可以使用哪些工具；
+    # 4. 强制它返回 ACTION / ARGUMENTS，方便程序用正则和 JSON 自动解析。
+    return build_ideation_system_prompt(
+        research_profile,
+        tool_descriptions,
+        tool_names_str,
+    )
 
 # 第一轮 prompt 给 LLM 两类上下文：
 # - workshop_description：用户提供的研究范围；
@@ -160,6 +143,7 @@ def generate_temp_free_idea(
     client: Any,
     model: str,
     workshop_description: str,
+    research_profile: Dict[str, Any],
     max_num_generations: int = 20,
     num_reflections: int = 5,
     reload_ideas: bool = True,
@@ -175,16 +159,19 @@ def generate_temp_free_idea(
     参数里的 client/model 来自 ai_scientist.llm.create_client，因此本函数不关心
     底层是 OpenAI、Claude、Gemini 还是其他兼容后端。
     """
+    research_profile = validate_research_profile(research_profile)
+    system_prompt = build_system_prompt(research_profile)
+
     # archive 用字符串形式保存 idea，是为了能直接拼进 prompt，提醒 LLM 不要
     # 重复已有方向；最终写文件前再转回 dict。
     idea_str_archive = []
 
-    # 如果已有 JSON 文件，先加载旧 idea。这样中断后重新运行时可以续写，也能
-    # 让新 idea 看到历史产物。
+    # 如果已有 JSON 文件，先加载旧 idea。只接受 schema v2 envelope，避免旧
+    # ML 默认数组格式悄悄进入 generalized pipeline。
     if reload_ideas and osp.exists(idea_fname):
         with open(idea_fname, "r") as f:
-            idea_str_content = json.load(f)
-            for idea in idea_str_content:
+            idea_envelope = validate_idea_envelope(json.load(f))
+            for idea in idea_envelope["ideas"]:
                 idea_str_archive.append(json.dumps(idea))
             print(f"Loaded {len(idea_str_archive)} ideas from {idea_fname}")
     else:
@@ -322,7 +309,7 @@ def generate_temp_free_idea(
     ideas = [json.loads(idea_str) for idea_str in idea_str_archive]
 
     with open(idea_fname, "w") as f:
-        json.dump(ideas, f, indent=4)
+        json.dump(make_idea_envelope(research_profile, ideas), f, indent=4)
     print(f"Stored {len(ideas)} ideas in {idea_fname}")
     return ideas
 
@@ -349,8 +336,29 @@ if __name__ == "__main__":
     parser.add_argument(
         "--workshop-file",
         type=str,
-        default="ideas/i_cant_believe_its_not_better.md",
+        required=True,
         help="Path to the workshop description file.",
+    )
+    parser.add_argument(
+        "--domain",
+        type=str,
+        default="auto",
+        choices=["auto", *valid_domain_ids()],
+        help="Research domain pack to use.",
+    )
+    parser.add_argument(
+        "--execution-backend",
+        type=str,
+        default="auto",
+        choices=["auto", *valid_execution_backend_ids()],
+        help="Execution backend to use for downstream experiments.",
+    )
+    parser.add_argument(
+        "--budget-profile",
+        type=str,
+        default="auto",
+        choices=["auto", *valid_budget_profile_ids()],
+        help="Static local resource budget profile.",
     )
     parser.add_argument(
         "--num-reflections",
@@ -370,6 +378,15 @@ if __name__ == "__main__":
     print(f"Using workshop description from {args.workshop_file} for idea generation.")
     print(f"Workshop description:\n{workshop_description}")
 
+    research_profile = plan_research_profile(
+        workshop_description,
+        domain=args.domain,
+        execution_backend=args.execution_backend,
+        budget_profile=args.budget_profile,
+    )
+    print("Research Profile:")
+    print(json.dumps(research_profile, indent=2))
+
     # 输出文件和输入 Markdown 同名，仅把 .md 替换成 .json。这个 JSON 会作为
     # 后续实验管线 launch_scientist_bfts.py --load_ideas 的输入。
     idea_fname = args.workshop_file.replace(".md", ".json")
@@ -379,6 +396,7 @@ if __name__ == "__main__":
         client=client,
         model=client_model,
         workshop_description=workshop_description,
+        research_profile=research_profile,
         max_num_generations=args.max_num_generations,
         num_reflections=args.num_reflections,
     )
