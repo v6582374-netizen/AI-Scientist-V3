@@ -1,0 +1,59 @@
+{
+    "schema_version": 2,
+    "research_profile": {
+        "schema_version": 1,
+        "domain": {
+            "id": "general",
+            "confidence": 1.0,
+            "rationale": "Domain was explicitly requested."
+        },
+        "execution": {
+            "backend": "local_cpu_limited",
+            "budget_profile": "tiny",
+            "evidence_level": "limited_empirical",
+            "rationale": "Budget profile was explicitly requested."
+        },
+        "claim_policy": {
+            "allowed": [
+                "preliminary empirical evidence",
+                "feasibility observations",
+                "resource-limited analysis"
+            ],
+            "forbidden": [
+                "full empirical validation",
+                "state-of-the-art performance claim",
+                "strong causal conclusion"
+            ]
+        },
+        "risk_flags": [
+            "automatic domain selection may be wrong",
+            "resource-limited execution may understate or overstate effects"
+        ]
+    },
+    "ideas": [
+        {
+            "Name": "pickup_similarity_map",
+            "Title": "A Dimensionless Pickup-Screening Map for Comparing Mars-like and Venus-like Induced Magnetospheres",
+            "Short Hypothesis": "Mars-like and Venus-like induced magnetospheres may share a simple response law when expressed in two dimensionless controls: the pickup length of newly created heavy ions relative to the induced obstacle size, and the solar-wind energy flux relative to ionospheric screening capacity. This setting is useful because it targets the minimal physics common to both planets\u2014IMF draping, motional electric-field pickup, and finite obstacle shielding\u2014without requiring global MHD, hybrid, or PIC simulations. Simpler purely empirical comparisons cannot isolate which dimensionless controls produce structural similarity, while full simulations are unnecessary for a first smoke test.",
+            "Related Work": "Reviews and spacecraft analyses show that Venus and Mars both form induced magnetospheres through solar-wind interaction with the ionosphere, but differ in obstacle size, EUV environment, crustal fields, and escape efficiency. Futaana et al. summarize Venus solar-wind coupling and the importance of draping, pickup, waves, and tail energization. Masunaga et al. show that Venus O+ escape depends strongly on motional electric field and EUV flux, with return flows complicating net escape. Persson et al. report that only a small fraction of upstream solar-wind power appears in escaping Venusian O+ and that this coupling differs from Mars. Recent Mars work emphasizes that crustal and large-scale fields make Mars partly hybrid rather than purely Venus-like. Existing work is dominated by mission statistics or global plasma models. This proposal is distinct because it asks whether a low-dimensional, dimensionless similarity map can reproduce qualitative Mars/Venus differences using only reduced fields and test-particle pickup, providing an interpretable bridge between empirical scaling and expensive global simulations rather than a substitute for either.",
+            "Abstract": "Unmagnetized terrestrial planets form induced magnetospheres when the solar wind drapes interplanetary magnetic field lines around an ionosphere-like obstacle. Mars and Venus are often compared, yet their different radii, solar distances, ionospheric scales, EUV forcing, and Martian crustal fields make it unclear which behaviors are truly shared. This proposal asks whether much of the first-order Mars/Venus contrast can be organized by a small number of dimensionless parameters rather than by planet-specific labels. We will build a CPU-light reduced model in which a solar wind flow encounters a parameterized conducting obstacle, the IMF is analytically draped around it, and newly created O+ ions are followed as test particles under the resulting motional electric field. The model will not attempt to reproduce global plasma structure self-consistently. Instead, it will generate a reproducible similarity map over obstacle size, solar-wind speed and density, IMF strength and clock angle, ion production scale height, and escape threshold. The main outputs will be interpretable metrics: pickup length divided by obstacle radius, fraction of synthetic ions reaching escape energy, tailward versus planetward flux imbalance, and a proxy coupling efficiency between incoming solar-wind power and escaping ion energy. Mars-like and Venus-like parameter boxes will then be projected onto the same map to test whether apparent differences collapse onto shared regimes. The expected contribution is a minimal, falsifiable framework for deciding when induced magnetospheres should behave comparably and when additional physics\u2014such as return flows, crustal fields, chemistry, or kinetic feedback\u2014must be invoked. Claims will be limited to feasibility observations and preliminary scaling behavior from reduced numerical experiments.",
+            "Experiments": [
+                "Build an analytic draping-and-pickup toy model. Represent the obstacle as a spherical ionopause/induced magnetosphere boundary with radius R_obs. Prescribe upstream solar-wind velocity V_sw and IMF B0, then use a simple potential-flow-like deflection around the obstacle and a draped magnetic-field direction that rotates around the obstacle while approximately preserving field magnitude outside the boundary. Compute E = -V x B. This is not a self-consistent plasma model; it is a controlled field generator.",
+                "Run test-particle O+ trajectories. Seed 500-5000 ions per parameter case from an exponential source layer near the dayside/terminator exobase with initial thermal energies below escape energy. Integrate Lorentz motion using a Boris or velocity-Verlet pusher for bounded time on a local CPU. Stop particles when they hit the obstacle, escape beyond a fixed downstream distance, or exceed a time limit. Metrics: escape fraction, median final energy, tailward/planetward flux ratio, and mean residence time.",
+                "Perform a tiny parameter sweep over Mars-like and Venus-like boxes. Vary V_sw, IMF magnitude, IMF clock angle, R_obs/R_planet, source scale height, and ion production normalization over coarse grids or Latin-hypercube samples of roughly 50-100 cases. Use published order-of-magnitude ranges rather than mission-scale data assimilation. Metrics: dimensionless pickup length L_pickup/R_obs, solar-wind power proxy P_sw proportional to rho V_sw^3 pi R_obs^2, escaping ion power proxy, and coupling efficiency proxy eta = P_escape/P_sw.",
+                "Test similarity collapse. Plot escape fraction and coupling efficiency proxy against L_pickup/R_obs and a screening parameter S representing obstacle size or ionospheric conductance proxy. Compare whether Mars-like and Venus-like cases separate mainly by raw planetary identity or collapse into common regimes. Use simple regression or rank correlation on the small sweep; report only preliminary trends and uncertainty from bootstrap resampling.",
+                "Add minimal asymmetry experiments. Repeat selected cases with IMF clock-angle changes and with a weak localized crustal-field perturbation on one hemisphere for Mars-like runs. The algorithmic change is to superpose a small dipole patch field near the obstacle surface. Metrics: hemispheric escape asymmetry, change in flux imbalance, and deviation from the shared similarity map.",
+                "Sensitivity and failure-mode analysis. Vary numerical time step, source altitude distribution, escape boundary distance, and draping prescription. Identify which conclusions are robust in sign and which depend on arbitrary model choices. Produce a short reproducibility notebook with all constants, plots, and summary tables."
+            ],
+            "Risk Factors and Limitations": [
+                "The reduced field model omits self-consistent plasma feedback, shocks, wave-particle interactions, finite ion pressure, chemistry, collisions, and realistic ionospheric electrodynamics.",
+                "Mars is not purely unmagnetized because crustal and possible large-scale fields can alter topology; the proposed crustal-field perturbation is only a crude sensitivity test.",
+                "The coupling efficiency proxy is not equivalent to spacecraft-derived escape power and should only be used for relative trends within the toy model.",
+                "Return flows observed at Venus may require reconnection, tail dynamics, or time-variable IMF structure that an analytic steady draping model cannot capture.",
+                "Parameter ranges from the literature may be broad and mission-dependent; this smoke test cannot provide full validation or predictive escape rates.",
+                "A successful similarity collapse would be preliminary evidence for useful nondimensional organization, not proof of a universal physical law.",
+                "A failed collapse would still be informative but may reflect oversimplified fields rather than true absence of common Mars/Venus scaling."
+            ]
+        }
+    ]
+}
