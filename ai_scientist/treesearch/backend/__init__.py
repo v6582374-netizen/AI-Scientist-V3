@@ -16,6 +16,13 @@ def get_ai_client(model: str, **model_kwargs):
     else:
         return backend_openai.get_ai_client(model=model, **model_kwargs)
 
+
+def get_ai_client_and_model(model: str, **model_kwargs):
+    if "claude-" in model:
+        return backend_anthropic.get_ai_client(model=model, **model_kwargs), model
+    return backend_openai.get_ai_client_and_model(model=model, **model_kwargs)
+
+
 def query(
     system_message: PromptType | None,
     user_message: PromptType | None,

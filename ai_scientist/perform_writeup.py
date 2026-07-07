@@ -32,7 +32,6 @@ from ai_scientist.llm import (
     get_response_from_llm,
     extract_json_between_markers,
     create_client,
-    AVAILABLE_LLMS,
 )
 
 from ai_scientist.tools.semantic_scholar import search_for_papers
@@ -832,15 +831,19 @@ if __name__ == "__main__":
         "--model",
         type=str,
         default="bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
-        choices=AVAILABLE_LLMS,
-        help="Model to use for citation collection (small model).",
+        help=(
+            "Model to use for citation collection (small model). Supports listed "
+            "models, qwen/<model>, and openai-compatible/<model>."
+        ),
     )
     parser.add_argument(
         "--big-model",
         type=str,
         default="o1-2024-12-17",
-        choices=AVAILABLE_LLMS,
-        help="Model to use for final writeup (big model).",
+        help=(
+            "Model to use for final writeup (big model). Supports listed models, "
+            "qwen/<model>, and openai-compatible/<model>."
+        ),
     )
     parser.add_argument(
         "--writeup-reflections",

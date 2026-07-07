@@ -6,6 +6,10 @@ import backoff
 import openai
 import os
 from PIL import Image
+from ai_scientist.openai_compatible import (
+    create_openai_compatible_client,
+    is_openai_compatible_model,
+)
 from ai_scientist.utils.token_tracker import track_token_usage
 
 MAX_NUM_TOKENS = 4096
@@ -29,7 +33,20 @@ AVAILABLE_VLMS = [
     "ollama/qwen2.5vl:32b",
 
     "ollama/z-uo/qwen2.5vl_tools:32b",
+
+    # Alibaba Qwen/DashScope via OpenAI-compatible mode.
+    # Any qwen/<provider-native-model> alias is accepted by create_client.
+    "qwen/qwen-vl-plus",
+    "qwen/qwen-vl-max",
 ]
+
+
+def _supports_chat_completions(client: Any) -> bool:
+    return hasattr(client, "chat")
+
+
+def _is_supported_vlm_model(client: Any, model: str) -> bool:
+    return model in AVAILABLE_VLMS or _supports_chat_completions(client)
 
 
 def encode_image_to_base64(image_path: str) -> str:
@@ -88,6 +105,19 @@ def make_llm_call(client, model, temperature, system_message, prompt):
             n=1,
             seed=0,
         )
+    elif _supports_chat_completions(client):
+        return client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_message},
+                *prompt,
+            ],
+            temperature=temperature,
+            max_tokens=MAX_NUM_TOKENS,
+            n=1,
+            stop=None,
+            seed=0,
+        )
     else:
         raise ValueError(f"Model {model} not supported.")
 
@@ -105,6 +135,16 @@ def make_vlm_call(client, model, temperature, system_message, prompt):
             max_tokens=MAX_NUM_TOKENS,
         )
     elif "gpt" in model:
+        return client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_message},
+                *prompt,
+            ],
+            temperature=temperature,
+            max_tokens=MAX_NUM_TOKENS,
+        )
+    elif _supports_chat_completions(client):
         return client.chat.completions.create(
             model=model,
             messages=[
@@ -144,7 +184,7 @@ def get_response_from_vlm(
     if msg_history is None:
         msg_history = []
 
-    if model in AVAILABLE_VLMS:
+    if _is_supported_vlm_model(client, model):
         # Convert single image path to list for consistent handling
         if isinstance(image_paths, str):
             image_paths = [image_paths]
@@ -194,7 +234,10 @@ def get_response_from_vlm(
 
 def create_client(model: str) -> tuple[Any, str]:
     """Create client for vision-language model."""
-    if model in [
+    if is_openai_compatible_model(model):
+        print(f"Using OpenAI-compatible API with model {model}.")
+        return create_openai_compatible_client(model)
+    elif model in [
         "gpt-4o-2024-05-13",
         "gpt-4o-2024-08-06",
         "gpt-4o-2024-11-20",
@@ -207,7 +250,7 @@ def create_client(model: str) -> tuple[Any, str]:
         print(f"Using Ollama API with model {model}.")
         return openai.OpenAI(
             api_key=os.environ.get("OLLAMA_API_KEY", ""),
-            base_url="http://localhost:11434/v1"
+            base_url="http://localhost:11434/v1",
         ), model
     else:
         raise ValueError(f"Model {model} not supported.")
@@ -279,7 +322,7 @@ def get_batch_responses_from_vlm(
     if msg_history is None:
         msg_history = []
 
-    if model in AVAILABLE_VLMS:
+    if _is_supported_vlm_model(client, model):
         # Convert single image path to list
         if isinstance(image_paths, str):
             image_paths = [image_paths]
