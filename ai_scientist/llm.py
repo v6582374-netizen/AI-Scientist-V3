@@ -7,6 +7,10 @@ from ai_scientist.utils.token_tracker import track_token_usage
 import anthropic
 import backoff
 import openai
+from ai_scientist.openai_compatible import (
+    create_openai_compatible_client,
+    is_openai_compatible_model,
+)
 
 MAX_NUM_TOKENS = 4096
 
@@ -51,6 +55,10 @@ AVAILABLE_LLMS = [
     "gemini-2.0-flash",
     "gemini-2.5-flash-preview-04-17",
     "gemini-2.5-pro-preview-03-25",
+    # Alibaba Qwen models via DashScope OpenAI-compatible API
+    "qwen/qwen-plus",
+    "qwen/qwen-turbo",
+    "qwen/qwen-max",
     # GPT-OSS models via Ollama
     "ollama/gpt-oss:20b",
     "ollama/gpt-oss:120b",
@@ -250,7 +258,18 @@ def make_llm_call(client, model, temperature, system_message, prompt):
             n=1,
             seed=0,
         )
-    
+    elif hasattr(client, "chat"):
+        return client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_message},
+                *prompt,
+            ],
+            temperature=temperature,
+            max_tokens=MAX_NUM_TOKENS,
+            n=1,
+            stop=None,
+        )
     else:
         raise ValueError(f"Model {model} not supported.")
 
@@ -434,6 +453,20 @@ def get_response_from_llm(
         )
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
+    elif hasattr(client, "chat"):
+        new_msg_history = msg_history + [{"role": "user", "content": msg}]
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_message},
+                *new_msg_history,
+            ],
+            temperature=temperature,
+            max_tokens=MAX_NUM_TOKENS,
+            n=1,
+        )
+        content = response.choices[0].message.content
+        new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
     else:
         raise ValueError(f"Model {model} not supported.")
 
@@ -478,7 +511,10 @@ def extract_json_between_markers(llm_output: str) -> dict | None:
 
 
 def create_client(model) -> tuple[Any, str]:
-    if model.startswith("claude-"):
+    if is_openai_compatible_model(model):
+        print(f"Using OpenAI-compatible API with model {model}.")
+        return create_openai_compatible_client(model)
+    elif model.startswith("claude-"):
         print(f"Using Anthropic API with model {model}.")
         return anthropic.Anthropic(), model
     elif model.startswith("bedrock") and "claude" in model:

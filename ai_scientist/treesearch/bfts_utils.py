@@ -3,6 +3,9 @@ import os.path as osp
 import shutil
 import yaml
 
+from ai_scientist.research_profile.budgets import apply_budget_profile_to_config
+from ai_scientist.research_profile.schema import validate_research_profile
+
 
 def idea_to_markdown(data: dict, output_path: str, load_code: str) -> None:
     """
@@ -42,7 +45,12 @@ def idea_to_markdown(data: dict, output_path: str, load_code: str) -> None:
                 f.write(f"```python\n{code}\n```\n\n")
 
 
-def edit_bfts_config_file(config_path: str, idea_dir: str, idea_path: str) -> str:
+def edit_bfts_config_file(
+    config_path: str,
+    idea_dir: str,
+    idea_path: str,
+    research_profile: dict | None = None,
+) -> str:
     """
     Edit the bfts_config.yaml file to point to the idea.md file
 
@@ -50,6 +58,7 @@ def edit_bfts_config_file(config_path: str, idea_dir: str, idea_path: str) -> st
         config_path: Path to the bfts_config.yaml file
         idea_dir: Directory where the idea.md file is located
         idea_path: Path to the idea.md file
+        research_profile: Optional generalized Research Profile to persist
 
     Returns:
         Path to the edited bfts_config.yaml file
@@ -70,6 +79,14 @@ def edit_bfts_config_file(config_path: str, idea_dir: str, idea_path: str) -> st
     log_dir = osp.join(idea_dir, "logs")
     os.makedirs(log_dir, exist_ok=True)
     config["log_dir"] = log_dir
+
+    if research_profile is not None:
+        research_profile = validate_research_profile(research_profile)
+        config["research_profile"] = research_profile
+        apply_budget_profile_to_config(
+            config,
+            research_profile["execution"]["budget_profile"],
+        )
 
     with open(run_config_path, "w") as f:
         yaml.dump(config, f)

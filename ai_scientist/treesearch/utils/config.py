@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Hashable, cast, Literal, Optional
 
-import coolname
 import rich
 from omegaconf import OmegaConf
 from rich.syntax import Syntax
@@ -107,6 +106,7 @@ class Config(Hashable):
     agent: AgentConfig
     experiment: ExperimentConfig
     debug: DebugConfig
+    research_profile: Optional[dict] = None
 
 
 def _get_next_logindex(dir: Path) -> int:
@@ -160,6 +160,8 @@ def prep_cfg(cfg: Config):
 
     # generate experiment name and prefix with consecutive index
     ind = max(_get_next_logindex(top_log_dir), _get_next_logindex(top_workspace_dir))
+    import coolname
+
     cfg.exp_name = cfg.exp_name or coolname.generate_slug(3)
     cfg.exp_name = f"{ind}-{cfg.exp_name}"
 

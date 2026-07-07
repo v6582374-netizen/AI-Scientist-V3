@@ -34,7 +34,6 @@ from ai_scientist.llm import (
     get_response_from_llm,
     extract_json_between_markers,
     create_client,
-    AVAILABLE_LLMS,
 )
 
 from ai_scientist.utils.token_tracker import track_token_usage
@@ -46,6 +45,10 @@ from ai_scientist.perform_vlm_review import (
     perform_imgs_cap_ref_review,
     perform_imgs_cap_ref_review_selection,
     detect_duplicate_figures,
+)
+from ai_scientist.research_profile.prompting import (
+    build_writeup_guidance,
+    load_research_profile_from_run,
 )
 from ai_scientist.vlm import create_client as create_vlm_client
 
@@ -904,6 +907,8 @@ def perform_writeup(
     """
     pdf_file = osp.join(base_folder, f"{osp.basename(base_folder)}.pdf")
     latex_folder = osp.join(base_folder, "latex")
+    research_profile = load_research_profile_from_run(base_folder)
+    writeup_guidance = build_writeup_guidance(research_profile)
 
     # 注意：这里会删除旧 latex 目录和旧 reflection PDF。它是生成流水线，不是只读分析。
     if osp.exists(latex_folder):
@@ -1019,6 +1024,8 @@ def perform_writeup(
         big_model_system_message = writeup_system_message_template.format(
             page_limit=page_limit
         )
+        if writeup_guidance:
+            big_model_system_message += "\n\n" + writeup_guidance
         big_client, big_client_model = create_client(big_model)
         with open(writeup_file, "r") as f:
             writeup_text = f.read()
@@ -1288,15 +1295,19 @@ if __name__ == "__main__":
         "--model",
         type=str,
         default="bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
-        choices=AVAILABLE_LLMS,
-        help="Model to use for citation collection (small model).",
+        help=(
+            "Model to use for citation collection (small model). Supports listed "
+            "models, qwen/<model>, and openai-compatible/<model>."
+        ),
     )
     parser.add_argument(
         "--big-model",
         type=str,
         default="o1-2024-12-17",
-        choices=AVAILABLE_LLMS,
-        help="Model to use for final writeup (big model).",
+        help=(
+            "Model to use for final writeup (big model). Supports listed models, "
+            "qwen/<model>, and openai-compatible/<model>."
+        ),
     )
     parser.add_argument(
         "--writeup-reflections",

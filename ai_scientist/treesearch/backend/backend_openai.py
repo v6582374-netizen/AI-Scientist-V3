@@ -6,6 +6,10 @@ from .utils import FunctionSpec, OutputType, opt_messages_to_list, backoff_creat
 from funcy import notnone, once, select_values
 import openai
 from rich import print
+from ai_scientist.openai_compatible import (
+    create_openai_compatible_client,
+    is_openai_compatible_model,
+)
 
 logger = logging.getLogger("ai-scientist")
 
@@ -17,14 +21,24 @@ OPENAI_TIMEOUT_EXCEPTIONS = (
     openai.InternalServerError,
 )
 
-def get_ai_client(model: str, max_retries=2) -> openai.OpenAI:
+
+def get_ai_client_and_model(model: str, max_retries=2) -> tuple[openai.OpenAI, str]:
+    if is_openai_compatible_model(model):
+        return create_openai_compatible_client(model, max_retries=max_retries)
+
     if model.startswith("ollama/"):
         client = openai.OpenAI(
-            base_url="http://localhost:11434/v1", 
-            max_retries=max_retries
+            base_url="http://localhost:11434/v1",
+            max_retries=max_retries,
         )
+        return client, model.replace("ollama/", "")
     else:
         client = openai.OpenAI(max_retries=max_retries)
+        return client, model
+
+
+def get_ai_client(model: str, max_retries=2) -> openai.OpenAI:
+    client, _ = get_ai_client_and_model(model, max_retries=max_retries)
     return client
 
 
@@ -34,8 +48,11 @@ def query(
     func_spec: FunctionSpec | None = None,
     **model_kwargs,
 ) -> tuple[OutputType, float, int, int, dict]:
-    client = get_ai_client(model_kwargs.get("model"), max_retries=0)
+    client, provider_model = get_ai_client_and_model(
+        model_kwargs.get("model"), max_retries=0
+    )
     filtered_kwargs: dict = select_values(notnone, model_kwargs)  # type: ignore
+    filtered_kwargs["model"] = provider_model
 
     messages = opt_messages_to_list(system_message, user_message)
 
@@ -43,9 +60,6 @@ def query(
         filtered_kwargs["tools"] = [func_spec.as_openai_tool_dict]
         # force the model to use the function
         filtered_kwargs["tool_choice"] = func_spec.openai_tool_choice_dict
-
-    if filtered_kwargs.get("model", "").startswith("ollama/"):
-       filtered_kwargs["model"] = filtered_kwargs["model"].replace("ollama/", "")
 
     t0 = time.time()
     completion = backoff_create(

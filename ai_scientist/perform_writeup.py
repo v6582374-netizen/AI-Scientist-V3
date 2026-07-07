@@ -32,12 +32,15 @@ from ai_scientist.llm import (
     get_response_from_llm,
     extract_json_between_markers,
     create_client,
-    AVAILABLE_LLMS,
 )
 
 from ai_scientist.tools.semantic_scholar import search_for_papers
 
 from ai_scientist.perform_vlm_review import generate_vlm_img_review
+from ai_scientist.research_profile.prompting import (
+    build_writeup_guidance,
+    load_research_profile_from_run,
+)
 from ai_scientist.vlm import create_client as create_vlm_client
 
 
@@ -497,6 +500,7 @@ def perform_writeup(
     big_model="o1-2024-12-17",
     n_writeup_reflections=3,
     page_limit=8,
+    citations_text=None,
 ):
     """把实验目录写成一篇通用 ICML 风格 LaTeX/PDF 论文。
 
@@ -514,6 +518,8 @@ def perform_writeup(
     compile_attempt = 0
     base_pdf_file = osp.join(base_folder, f"{osp.basename(base_folder)}")
     latex_folder = osp.join(base_folder, "latex")
+    research_profile = load_research_profile_from_run(base_folder)
+    writeup_guidance = build_writeup_guidance(research_profile)
 
     # 这个阶段会删除旧 latex 目录。若用户手动改过 base_folder/latex，需要先备份。
     if osp.exists(latex_folder):
@@ -672,6 +678,8 @@ def perform_writeup(
         big_model_system_message = writeup_system_message_template.format(
             page_limit=page_limit
         )
+        if writeup_guidance:
+            big_model_system_message += "\n\n" + writeup_guidance
         big_client, big_client_model = create_client(big_model)
         with open(writeup_file, "r") as f:
             writeup_text = f.read()
@@ -823,15 +831,19 @@ if __name__ == "__main__":
         "--model",
         type=str,
         default="bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
-        choices=AVAILABLE_LLMS,
-        help="Model to use for citation collection (small model).",
+        help=(
+            "Model to use for citation collection (small model). Supports listed "
+            "models, qwen/<model>, and openai-compatible/<model>."
+        ),
     )
     parser.add_argument(
         "--big-model",
         type=str,
         default="o1-2024-12-17",
-        choices=AVAILABLE_LLMS,
-        help="Model to use for final writeup (big model).",
+        help=(
+            "Model to use for final writeup (big model). Supports listed models, "
+            "qwen/<model>, and openai-compatible/<model>."
+        ),
     )
     parser.add_argument(
         "--writeup-reflections",

@@ -39,3 +39,11 @@ _Avoid_: confidence, validation mode, result quality
 **Budget Profile**:
 A static resource budget tier that maps to hard execution limits and soft experiment-size guidance, such as tiny, small, medium, or full. The Research Profile Planner may choose a Budget Profile, but it does not invent numeric hard limits in the first implementation.
 _Avoid_: resource preset, hardware profile, runtime settings
+
+**OpenAI-Compatible Provider**:
+A model provider that exposes an OpenAI Chat Completions-compatible API while owning its own credentials, base URL, and model namespace. It is an integration boundary, not a Domain Pack or Execution Backend.
+_Avoid_: third-party OpenAI API, custom OpenAI key, compatible model
+
+**Qwen Provider**:
+The built-in OpenAI-Compatible Provider for Alibaba Qwen models through Alibaba Cloud Model Studio / DashScope compatible mode.
+_Avoid_: Ali model hack, DashScope special case, qwen plugin
