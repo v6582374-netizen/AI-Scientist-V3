@@ -29,6 +29,7 @@ from ai_scientist.llm import (
     create_client,
     get_response_from_llm,
 )
+from ai_scientist.model_defaults import DEFAULT_MODEL
 from ai_scientist.research_profile.budgets import valid_budget_profile_ids
 from ai_scientist.research_profile.domains import valid_domain_ids
 from ai_scientist.research_profile.execution_backends import (
@@ -322,7 +323,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=str,
-        default="gpt-4o-2024-05-13",
+        default=DEFAULT_MODEL,
         help=(
             "Model to use for AI Scientist. Supports listed models, qwen/<model>, "
             "and openai-compatible/<model>."

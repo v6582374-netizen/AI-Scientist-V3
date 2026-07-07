@@ -13,6 +13,7 @@ from ai_scientist.research_profile.domains import valid_domain_ids
 from ai_scientist.research_profile.execution_backends import (
     valid_execution_backend_ids,
 )
+from ai_scientist.model_defaults import DEFAULT_MODEL
 from ai_scientist.research_profile.prompting import build_review_system_prompt
 from ai_scientist.research_profile.schema import (
     apply_profile_overrides,
@@ -81,19 +82,19 @@ def parse_arguments():
     parser.add_argument(
         "--model_agg_plots",
         type=str,
-        default="o3-mini-2025-01-31",
+        default=DEFAULT_MODEL,
         help="Model to use for plot aggregation",
     )
     parser.add_argument(
         "--model_writeup",
         type=str,
-        default="o1-preview-2024-09-12",
+        default=DEFAULT_MODEL,
         help="Model to use for writeup",
     )
     parser.add_argument(
         "--model_citation",
         type=str,
-        default="gpt-4o-2024-11-20",
+        default=DEFAULT_MODEL,
         help="Model to use for citation gathering",
     )
     parser.add_argument(
@@ -105,14 +106,41 @@ def parse_arguments():
     parser.add_argument(
         "--model_writeup_small",
         type=str,
-        default="gpt-4o-2024-05-13",
+        default=DEFAULT_MODEL,
         help="Smaller model to use for writeup",
     )
     parser.add_argument(
         "--model_review",
         type=str,
-        default="gpt-4o-2024-11-20",
+        default=DEFAULT_MODEL,
         help="Model to use for review main text and captions",
+    )
+    parser.add_argument(
+        "--model_bfts_code",
+        type=str,
+        default=DEFAULT_MODEL,
+        help=(
+            "Model to use for BFTS experiment code generation. Supports listed "
+            "models, qwen/<model>, and openai-compatible/<model>."
+        ),
+    )
+    parser.add_argument(
+        "--model_bfts_feedback",
+        type=str,
+        default=DEFAULT_MODEL,
+        help=(
+            "Model to use for BFTS experiment feedback and debugging. Supports "
+            "listed models, qwen/<model>, and openai-compatible/<model>."
+        ),
+    )
+    parser.add_argument(
+        "--model_bfts_vlm_feedback",
+        type=str,
+        default=DEFAULT_MODEL,
+        help=(
+            "Model to use for BFTS visual feedback. Use a vision-capable model "
+            "when figure review is needed."
+        ),
     )
     parser.add_argument(
         "--skip_writeup",
@@ -146,6 +174,14 @@ def parse_arguments():
         help="Override the static resource budget selected during ideation.",
     )
     return parser.parse_args()
+
+
+def build_bfts_model_overrides(args):
+    return {
+        "code": args.model_bfts_code,
+        "feedback": args.model_bfts_feedback,
+        "vlm_feedback": args.model_bfts_vlm_feedback,
+    }
 
 
 def get_available_gpus(gpu_ids=None):
@@ -315,6 +351,7 @@ if __name__ == "__main__":
         idea_dir,
         idea_path_json,
         research_profile=research_profile,
+        bfts_model_overrides=build_bfts_model_overrides(args),
     )
 
     perform_experiments_bfts(idea_config_path)

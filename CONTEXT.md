@@ -47,3 +47,7 @@ _Avoid_: third-party OpenAI API, custom OpenAI key, compatible model
 **Qwen Provider**:
 The built-in OpenAI-Compatible Provider for Alibaba Qwen models through Alibaba Cloud Model Studio / DashScope compatible mode.
 _Avoid_: Ali model hack, DashScope special case, qwen plugin
+
+**Default Model**:
+The model automatically used by an AI Scientist stage when the user has not supplied a stage-specific model override. It must be consistent across ideation, BFTS experimentation, plotting, citation, writeup, and review.
+_Avoid_: fallback model, base model, hidden model setting

@@ -10,11 +10,13 @@ from ai_scientist.openai_compatible import (
     create_openai_compatible_client,
     is_openai_compatible_model,
 )
+from ai_scientist.model_defaults import DEFAULT_MODEL
 from ai_scientist.utils.token_tracker import track_token_usage
 
 MAX_NUM_TOKENS = 4096
 
 AVAILABLE_VLMS = [
+    DEFAULT_MODEL,
     "gpt-4o-2024-05-13",
     "gpt-4o-2024-08-06",
     "gpt-4o-2024-11-20",
@@ -238,6 +240,7 @@ def create_client(model: str) -> tuple[Any, str]:
         print(f"Using OpenAI-compatible API with model {model}.")
         return create_openai_compatible_client(model)
     elif model in [
+        DEFAULT_MODEL,
         "gpt-4o-2024-05-13",
         "gpt-4o-2024-08-06",
         "gpt-4o-2024-11-20",

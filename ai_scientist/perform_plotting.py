@@ -28,6 +28,7 @@ import traceback
 from rich import print
 
 from ai_scientist.llm import create_client, get_response_from_llm
+from ai_scientist.model_defaults import DEFAULT_MODEL
 from ai_scientist.utils.token_tracker import token_tracker
 from ai_scientist.perform_icbinb_writeup import (
     load_idea_text,
@@ -162,7 +163,7 @@ def run_aggregator_script(
 
 
 def aggregate_plots(
-    base_folder: str, model: str = "o1-2024-12-17", n_reflections: int = 5
+    base_folder: str, model: str = DEFAULT_MODEL, n_reflections: int = 5
 ) -> None:
     """为一个实验目录生成最终论文图表。
 
@@ -304,8 +305,8 @@ def main():
     )
     parser.add_argument(
         "--model",
-        default="o1-2024-12-17",
-        help="LLM model to use (default: o1-2024-12-17).",
+        default=DEFAULT_MODEL,
+        help=f"LLM model to use (default: {DEFAULT_MODEL}).",
     )
     parser.add_argument(
         "--reflections",

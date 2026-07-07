@@ -11,6 +11,7 @@ from ai_scientist.openai_compatible import (
     create_openai_compatible_client,
     is_openai_compatible_model,
 )
+from ai_scientist.model_defaults import DEFAULT_MODEL
 
 MAX_NUM_TOKENS = 4096
 
@@ -27,6 +28,7 @@ AVAILABLE_LLMS = [
     "gpt-4.1-2025-04-14",
     "gpt-4.1-mini",
     "gpt-4.1-mini-2025-04-14",
+    DEFAULT_MODEL,
     "o1",
     "o1-2024-12-17",
     "o1-preview-2024-09-12",

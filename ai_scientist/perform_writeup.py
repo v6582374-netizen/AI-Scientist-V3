@@ -33,6 +33,7 @@ from ai_scientist.llm import (
     extract_json_between_markers,
     create_client,
 )
+from ai_scientist.model_defaults import DEFAULT_MODEL
 
 from ai_scientist.tools.semantic_scholar import search_for_papers
 
@@ -496,8 +497,8 @@ def perform_writeup(
     base_folder,
     no_writing=False,
     num_cite_rounds=20,
-    small_model="gpt-4o-2024-05-13",
-    big_model="o1-2024-12-17",
+    small_model=DEFAULT_MODEL,
+    big_model=DEFAULT_MODEL,
     n_writeup_reflections=3,
     page_limit=8,
     citations_text=None,
@@ -830,7 +831,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=str,
-        default="bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
+        default=DEFAULT_MODEL,
         help=(
             "Model to use for citation collection (small model). Supports listed "
             "models, qwen/<model>, and openai-compatible/<model>."
@@ -839,7 +840,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--big-model",
         type=str,
-        default="o1-2024-12-17",
+        default=DEFAULT_MODEL,
         help=(
             "Model to use for final writeup (big model). Supports listed models, "
             "qwen/<model>, and openai-compatible/<model>."

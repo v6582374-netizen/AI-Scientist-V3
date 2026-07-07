@@ -123,7 +123,7 @@ export S2_API_KEY="YOUR_S2_KEY_HERE"
    ```bash
    python ai_scientist/perform_ideation_temp_free.py \
     --workshop-file "ai_scientist/ideas/my_research_topic.md" \
-    --model gpt-4o-2024-05-13 \
+    --model gpt-5.5 \
     --max-num-generations 20 \
     --num-reflections 5
    ```
@@ -164,17 +164,17 @@ export S2_API_KEY="YOUR_S2_KEY_HERE"
   - `debug_prob`：尝试调试失败节点的概率。
   - `num_drafts`：Stage 1 中初始根节点数量，也就是要增长的独立树数量。
 
-下面示例使用生成的想法文件运行 AI Scientist-v2，例如 `my_research_topic.json`。请先查看 `bfts_config.yaml` 以了解详细树搜索参数。默认配置中，实验阶段会使用 `claude-3-5-sonnet`。如果你不想用一段代码片段初始化实验，请不要设置 `load_code`。
+下面示例使用生成的想法文件运行 AI Scientist-v2，例如 `my_research_topic.json`。请先查看 `bfts_config.yaml` 以了解详细树搜索参数。构思、BFTS 实验、绘图、写作、引用和评审阶段的默认模型均为 `gpt-5.5`。如果你不想用一段代码片段初始化实验，请不要设置 `load_code`。
 
 ```bash
 python launch_scientist_bfts.py \
  --load_ideas "ai_scientist/ideas/my_research_topic.json" \
  --load_code \
  --add_dataset_ref \
- --model_writeup o1-preview-2024-09-12 \
- --model_citation gpt-4o-2024-11-20 \
- --model_review gpt-4o-2024-11-20 \
- --model_agg_plots o3-mini-2025-01-31 \
+ --model_writeup gpt-5.5 \
+ --model_citation gpt-5.5 \
+ --model_review gpt-5.5 \
+ --model_agg_plots gpt-5.5 \
  --num_cite_rounds 20
 ```
 

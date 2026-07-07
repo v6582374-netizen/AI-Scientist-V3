@@ -6,6 +6,8 @@ import yaml
 from ai_scientist.research_profile.budgets import apply_budget_profile_to_config
 from ai_scientist.research_profile.schema import validate_research_profile
 
+BFTS_MODEL_OVERRIDE_SECTIONS = {"code", "feedback", "vlm_feedback"}
+
 
 def idea_to_markdown(data: dict, output_path: str, load_code: str) -> None:
     """
@@ -50,6 +52,7 @@ def edit_bfts_config_file(
     idea_dir: str,
     idea_path: str,
     research_profile: dict | None = None,
+    bfts_model_overrides: dict[str, str] | None = None,
 ) -> str:
     """
     Edit the bfts_config.yaml file to point to the idea.md file
@@ -59,6 +62,7 @@ def edit_bfts_config_file(
         idea_dir: Directory where the idea.md file is located
         idea_path: Path to the idea.md file
         research_profile: Optional generalized Research Profile to persist
+        bfts_model_overrides: Optional agent model overrides for BFTS stages
 
     Returns:
         Path to the edited bfts_config.yaml file
@@ -87,6 +91,19 @@ def edit_bfts_config_file(
             config,
             research_profile["execution"]["budget_profile"],
         )
+
+    if bfts_model_overrides:
+        invalid_sections = set(bfts_model_overrides) - BFTS_MODEL_OVERRIDE_SECTIONS
+        if invalid_sections:
+            raise ValueError(
+                "Unknown BFTS model override section(s): "
+                f"{', '.join(sorted(invalid_sections))}"
+            )
+        agent_config = config.setdefault("agent", {})
+        for section, model in bfts_model_overrides.items():
+            if not model:
+                continue
+            agent_config.setdefault(section, {})["model"] = model
 
     with open(run_config_path, "w") as f:
         yaml.dump(config, f)
