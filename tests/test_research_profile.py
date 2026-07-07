@@ -238,6 +238,23 @@ agent:
         with self.assertRaisesRegex(ValueError, "ML-oriented"):
             validate_launch_options(args, profile)
 
+    def test_launch_accepts_default_normal_writeup_for_general_domain(self):
+        from launch_scientist_bfts import validate_launch_options
+
+        profile = plan_research_profile(
+            "Analyze municipal water usage records.",
+            domain="general",
+            execution_backend="local_cpu_limited",
+            budget_profile="small",
+            cuda_available=False,
+        )
+        args = Namespace(
+            load_code=False,
+            add_dataset_ref=False,
+            writeup_type="normal",
+        )
+        self.assertIsNone(validate_launch_options(args, profile))
+
     def test_minimal_agent_general_prompt_uses_profile(self):
         from ai_scientist.treesearch.parallel_agent import MinimalAgent
 
