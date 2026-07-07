@@ -169,11 +169,14 @@ def generate_temp_free_idea(
     # 如果已有 JSON 文件，先加载旧 idea。只接受 schema v2 envelope，避免旧
     # ML 默认数组格式悄悄进入 generalized pipeline。
     if reload_ideas and osp.exists(idea_fname):
-        with open(idea_fname, "r") as f:
-            idea_envelope = validate_idea_envelope(json.load(f))
-            for idea in idea_envelope["ideas"]:
-                idea_str_archive.append(json.dumps(idea))
-            print(f"Loaded {len(idea_str_archive)} ideas from {idea_fname}")
+        if osp.getsize(idea_fname) == 0:
+            print(f"Idea file {idea_fname} is empty. Starting from scratch.")
+        else:
+            with open(idea_fname, "r") as f:
+                idea_envelope = validate_idea_envelope(json.load(f))
+                for idea in idea_envelope["ideas"]:
+                    idea_str_archive.append(json.dumps(idea))
+                print(f"Loaded {len(idea_str_archive)} ideas from {idea_fname}")
     else:
         print(f"No ideas found in {idea_fname}. Starting from scratch.")
 
@@ -307,6 +310,11 @@ def generate_temp_free_idea(
 
     # 只把已 finalized 的 idea 写回 JSON。没完成 FinalizeIdea 的尝试会被丢弃。
     ideas = [json.loads(idea_str) for idea_str in idea_str_archive]
+    if not ideas:
+        raise RuntimeError(
+            "No ideas were finalized. Check the earlier LLM/provider error or "
+            "increase --num-reflections so the model has a chance to call FinalizeIdea."
+        )
 
     with open(idea_fname, "w") as f:
         json.dump(make_idea_envelope(research_profile, ideas), f, indent=4)

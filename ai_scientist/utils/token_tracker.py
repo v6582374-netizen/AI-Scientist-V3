@@ -2,7 +2,7 @@ from functools import wraps
 from typing import Dict, Optional, List
 import tiktoken
 from collections import defaultdict
-import asyncio
+import inspect
 from datetime import datetime
 import logging
 
@@ -140,6 +140,47 @@ class TokenTracker:
 token_tracker = TokenTracker()
 
 
+def _require_chat_completion_like(result):
+    if not hasattr(result, "model"):
+        raise ValueError(
+            "LLM call returned a non-ChatCompletion response without a .model "
+            "attribute. If using an OpenAI-compatible provider, check that "
+            "base_url points to the API root, usually ending in /v1, not a web UI."
+        )
+
+
+def _optional_int(value) -> int:
+    return 0 if value is None else value
+
+
+def _record_token_usage(result, *, prompt, system_message):
+    _require_chat_completion_like(result)
+    model = result.model
+    timestamp = result.created
+
+    usage = getattr(result, "usage", None)
+    if usage is not None:
+        completion_details = getattr(usage, "completion_tokens_details", None)
+        prompt_details = getattr(usage, "prompt_tokens_details", None)
+        token_tracker.add_tokens(
+            model,
+            _optional_int(getattr(usage, "prompt_tokens", 0)),
+            _optional_int(getattr(usage, "completion_tokens", 0)),
+            _optional_int(getattr(completion_details, "reasoning_tokens", 0)),
+            _optional_int(getattr(prompt_details, "cached_tokens", 0)),
+        )
+
+    token_tracker.add_interaction(
+        model,
+        system_message,
+        prompt,
+        result.choices[
+            0
+        ].message.content,  # Assumes response is in content field
+        timestamp,
+    )
+
+
 def track_token_usage(func):
     @wraps(func)
     async def async_wrapper(*args, **kwargs):
@@ -154,31 +195,11 @@ def track_token_usage(func):
         logging.info("kwargs: ", kwargs)
 
         result = await func(*args, **kwargs)
-        model = result.model
-        timestamp = result.created
-
-        if hasattr(result, "usage") and result.usage.completion_tokens_details is not None:
-            token_tracker.add_tokens(
-                model,
-                result.usage.prompt_tokens,
-                result.usage.completion_tokens,
-                result.usage.completion_tokens_details.reasoning_tokens,
-                (
-                    result.usage.prompt_tokens_details.cached_tokens
-                    if hasattr(result.usage, "prompt_tokens_details")
-                    else 0
-                ),
-            )
-            # Add interaction details
-            token_tracker.add_interaction(
-                model,
-                system_message,
-                prompt,
-                result.choices[
-                    0
-                ].message.content,  # Assumes response is in content field
-                timestamp,
-            )
+        _record_token_usage(
+            result,
+            prompt=prompt,
+            system_message=system_message,
+        )
         return result
 
     @wraps(func)
@@ -190,33 +211,14 @@ def track_token_usage(func):
                 "Either 'prompt' or 'system_message' must be provided for token tracking"
             )
         result = func(*args, **kwargs)
-        model = result.model
-        timestamp = result.created
         logging.info("args: ", args)
         logging.info("kwargs: ", kwargs)
 
-        if hasattr(result, "usage") and result.usage.completion_tokens_details is not None:
-            token_tracker.add_tokens(
-                model,
-                result.usage.prompt_tokens,
-                result.usage.completion_tokens,
-                result.usage.completion_tokens_details.reasoning_tokens,
-                (
-                    result.usage.prompt_tokens_details.cached_tokens
-                    if hasattr(result.usage, "prompt_tokens_details")
-                    else 0
-                ),
-            )
-            # Add interaction details
-            token_tracker.add_interaction(
-                model,
-                system_message,
-                prompt,
-                result.choices[
-                    0
-                ].message.content,  # Assumes response is in content field
-                timestamp,
-            )
+        _record_token_usage(
+            result,
+            prompt=prompt,
+            system_message=system_message,
+        )
         return result
 
-    return async_wrapper if asyncio.iscoroutinefunction(func) else sync_wrapper
+    return async_wrapper if inspect.iscoroutinefunction(func) else sync_wrapper

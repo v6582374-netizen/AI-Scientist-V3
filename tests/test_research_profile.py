@@ -143,6 +143,50 @@ class ResearchProfileTests(unittest.TestCase):
                     max_num_generations=0,
                 )
 
+    def test_ideation_does_not_write_empty_idea_file(self):
+        from ai_scientist.perform_ideation_temp_free import generate_temp_free_idea
+
+        profile = plan_research_profile(
+            "Analyze municipal water usage records.",
+            cuda_available=False,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            idea_path = Path(tmpdir) / "ideas.json"
+
+            with self.assertRaisesRegex(RuntimeError, "No ideas were finalized"):
+                generate_temp_free_idea(
+                    idea_fname=str(idea_path),
+                    client=None,
+                    model="unused",
+                    workshop_description="unused",
+                    research_profile=profile,
+                    max_num_generations=0,
+                    reload_ideas=False,
+                )
+
+            self.assertFalse(idea_path.exists())
+
+    def test_ideation_treats_zero_byte_idea_file_as_absent(self):
+        from ai_scientist.perform_ideation_temp_free import generate_temp_free_idea
+
+        profile = plan_research_profile(
+            "Analyze municipal water usage records.",
+            cuda_available=False,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            idea_path = Path(tmpdir) / "ideas.json"
+            idea_path.touch()
+
+            with self.assertRaisesRegex(RuntimeError, "No ideas were finalized"):
+                generate_temp_free_idea(
+                    idea_fname=str(idea_path),
+                    client=None,
+                    model="unused",
+                    workshop_description="unused",
+                    research_profile=profile,
+                    max_num_generations=0,
+                )
+
     def test_edit_bfts_config_stores_profile_and_applies_budget(self):
         import yaml
 
